@@ -1,0 +1,246 @@
+---
+title: "2. Model Fitting"
+format: html
+execute:
+  echo: false      # hide code
+  warning: false    # hide warnings
+  message: false    # hide messages (e.g. package load chatter)
+---
+
+```{r}
+#| include: false
+knitr::opts_chunk$set(results = "hide")
+library(dplyr)
+library(ggplot2)
+library(sdmTMB)
+library(sf)
+
+source(here::here("R", "00-settings.R"))
+
+dog <- readRDS(file.path(model_input_dir, "dogfish.rds"))
+temp_df <- readRDS(file.path(model_input_dir, "bottom-temperature-df.rds"))
+depth_df <- readRDS(file.path(model_input_dir, "depth-df.rds"))
+
+```
+
+### 2. Fit species distribution model using sdmTMB
+
+* Fit species distribution model to model dogfish catch rates as a function of depth and bottom temperature
+
+* Autoregressive models to allow for forecasting
+
+```{r}
+dog_mesh <- make_mesh(data = dog, xy_cols = c("X", "Y"), cutoff = 30) # can make smaller later
+
+missing_years <- sdmTMB:::find_missing_time(dog$year) # why not export this?
+
+# Have two types of models so I can make sure code works with one or two linear predictors
+fit_tw <- local(
+  sdmTMB(
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    offset = log(dog$area_swept), # include as smoother later?
+    # family = delta_gengamma(type = "poisson-link"), # wouldn't fit/taking forever
+    family = tweedie(link = "log"),
+    data = dog,
+    mesh = dog_mesh,
+    spatial = "on",
+    spatiotemporal = "ar1",
+    time = "year",
+    extra_time = missing_years,
+    control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
+    silent = FALSE
+  )
+)
+fit_tw
+
+# fit_tv <- local(update(fit, time_varying = ~ 1, time_varying_type = "ar1"))
+# sanity(fit_tv)
+
+fit_ln <- local(
+  sdmTMB(
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    offset = log(dog$area_swept), # include as smoother later?
+    family = delta_lognormal(type = "poisson-link"), # @QUESTION: Should this always be a poisson link where possible?
+    data = dog,
+    mesh = dog_mesh,
+    spatial = "off", # on collapsed (I'm pretty sure but now I'm second guessing and maybe was just taking forever to run - revisit)
+    spatiotemporal = "ar1",
+    time = "year",
+    extra_time = missing_years,
+    control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
+    silent = FALSE
+  )
+)
+sanity(fit_ln)
+
+fit_ln_tv <- local(
+  update(
+    fit_ln, time_varying = ~ 1, time_varying_type = "ar1"
+  )
+)
+
+fit_ln_tv
+sanity(fit_ln_tv)
+
+# fit <- fit_tw
+fit <- fit_ln_tv
+
+```
+
+### 1b. Todo: model diagnostics
+
+* see forthcoming ICES working group diagnostics output
+
+* Should this also include the seesaw index ACF moving window and max biennial oscillation worth including in this? especially when we consider integrating multiple surveys? Or when we have surveys with biennial sampling? I guess I'm thinking this because of our interest in estimating trends in the indicators and I haven't wrapped my head around waht getting it wrong at this stage would mean for them.
+
+
+```{r}
+
+# @TODO: make this work for the single linear predictor models as well
+# - don't feel like doing this right now, want to get to indicators
+dog$resid <- residuals(fit, type = "mle-mvn", model = 2)
+# note: NA residuals are when catch_weight = 0 (i.e., binomial part of the model)
+
+ggplot(dog, aes(log_depth, resid)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_point()
+
+ggplot(dog, aes(bottom_temp, resid)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_point()
+
+ggplot(dog, aes(X, Y, colour = resid)) +
+  facet_wrap(~ year) +
+  geom_point() +
+  coord_fixed() +
+  scale_colour_gradient2(na.value="grey") +
+  ggtitle("Spatial residuals")
+
+s <- simulate(fit, nsim = 300, type = "mle-mvn")
+dharma_residuals(s, fit)
+
+```
+
+```{r}
+visreg_delta(fit, xvar = "log_depth", model = 1, scale = "response")
+visreg_delta(fit, xvar = "log_depth", model = 2, scale = "response")
+
+visreg_delta(fit, xvar = "bottom_temp", model = 1, scale = "response")
+visreg_delta(fit, xvar = "bottom_temp", model = 2, scale = "response")
+```
+
+#### Mapping predictions
+```{r predict}
+# Loaded so I have grid polygons for plotting
+wcvi_poly <- gfdata::load_survey_blocks(type = "polygon") |>
+  filter(survey_abbrev == "SYN WCVI")
+
+# Build prediction grid: filter the full-domain covariate grids
+wcvi_temp_df <- temp_df |> filter(survey_abbrev == "SYN WCVI")
+
+wcvi_depth_df <- depth_df |>
+  filter(survey_abbrev == "SYN WCVI") |>
+  select(cell, log_depth)
+
+# @NOTE I think area should be carried through; not sure what the cleanest way to do this is
+# Might also be worth including block id from prediction grids throughout as unique key
+# instead of needing to rely on spatial joins for plotting
+pred_grid <- left_join(wcvi_temp_df, wcvi_depth_df, by = "cell") |>
+  filter(!is.na(bottom_temp), !is.na(log_depth), !is.infinite(log_depth)) |>
+  select(-cell)
+
+pred_grid_sf <- XY_to_sf(pred_grid, crs_to = st_crs(wcvi_poly)) |>
+  st_join(wcvi_poly |>  select(area))
+
+all.equal(nrow(pred_grid), nrow(pred_grid_sf)) # @TODO better check?
+
+# Prediction grid should hold all the covariates/columns needed for downstream to avoid potential join issues
+pred_grid <- pred_grid_sf |> st_drop_geometry()
+
+predictions <- predict(fit, newdata = pred_grid, type = "link", return_tmb_object = TRUE)
+pred_sf <- predictions$data |> XY_to_sf(crs_to = st_crs(wcvi_poly))
+pred_poly <- st_join(wcvi_poly |> select(geometry), pred_sf)  # Make raster version for plotting
+
+# Some visual checks -----------------------------------------------------------
+# @TODO: pull into function file and document
+# est: always combinable via each component's own link function
+combine_est <- function(pred, fit) {
+  if (isTRUE(fit$family$delta)) {
+    pred$est_combined <- fit$family[[1]]$linkinv(pred$est1) * fit$family[[2]]$linkinv(pred$est2)
+  } else {
+    pred$est_combined <- fit$family$linkinv(pred$est)
+  }
+  pred
+}
+# @TODO: pull into function file and document
+# spatial/spatiotemporal fields: figure out which component(s) actually have
+# the field "on", and return the column name(s) to plot -- never both summed
+field_columns <- function(fit, prefix) {
+  field_name <- if (prefix == "omega_s") "spatial" else "spatiotemporal"
+  status <- fit[[field_name]]
+  is_delta <- isTRUE(fit$family$delta)
+  on <- if (is_delta) which(status != "off") else if (any(status != "off")) 1L else integer(0)
+  if (length(on) == 0) {
+    cli::cli_alert_info("{.strong {field_name}} random field not used in the model.")
+    return(NULL)
+  }
+  if (!is_delta) return(prefix)
+  cli::cli_alert_info("{.strong {field_name}} random field on for delta component{?s} {on}.")
+  paste0(prefix, on)
+}
+
+# @TODO: these plots are a lot, improve their layout, maybe just subset some years, not sure
+pred_poly <- combine_est(pred_poly, fit)
+
+ggplot(pred_poly) +
+  geom_sf(aes(fill = est_combined), colour = NA) +
+  scale_fill_viridis_c(trans = "log10") +
+  facet_wrap(~year) +
+  ggtitle("Predicted distribution of Pacific Spiny Dogfish (WCVI)")
+  # ggtitle("Predicted distribution") # TODO add species name
+
+# @TODO: pull into function file and document
+plot_field <- function(pred_poly, fit, prefix, title) {
+  cols <- field_columns(fit, prefix)
+  if (is.null(cols)) return(invisible(NULL))
+
+  pred_poly |>
+    tidyr::pivot_longer(cols = all_of(cols), names_to = "component", values_to = "value") |>
+    ggplot() +
+    geom_sf(aes(fill = value), colour = NA) +
+    scale_fill_gradient2() +
+    facet_grid(component ~ year) +
+    ggtitle(title)
+}
+
+plot_field(pred_poly, fit, "omega_s", "Spatial random field")
+plot_field(pred_poly, fit, "epsilon_st", "Spatiotemporal random field")
+
+
+```
+
+
+### Save fitted model for downstream stages
+
+* might calculate the shift indicators here and save those instead of the prediction values
+
+
+```{r}
+# For now save these outputs for testing
+# @TODO: I think workflow-wise, as part of the diagnostics we'll look at the full region predictions, but we will need to recalculate the predictions for the subregions when we go to calculate the shift indicators
+
+fit_dir <- file.path(model_out_dir, "fits")
+dir.create(fit_dir, showWarnings = FALSE)
+fit |> saveRDS(file.path(fit_dir, "dogfish.rds"))
+
+pred_dir <- file.path(model_out_dir, "predictions")
+dir.create(pred_dir, showWarnings = FALSE)
+predictions |> saveRDS(file.path(pred_dir, "dogfish.rds")) # @TODO: rename this directory to something that makes more sense
+
+pred_sf_dir <- file.path(model_out_dir, "predictions-sf")
+dir.create(pred_sf_dir, showWarnings = FALSE)
+pred_poly |> saveRDS(file.path(pred_sf_dir, "dogfish.rds"))
+
+```
+
+

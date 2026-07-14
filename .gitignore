@@ -1,0 +1,31 @@
+# Data (public repo — keep raw/generated/reference data out of git history)
+data-raw/
+data-generated/
+
+# Quarto
+.quarto/
+*.html
+*_files/
+*_cache/
+*.rmarkdown
+_quarto.yml
+
+# R
+.Rhistory
+.Rprofile
+.RData
+.Rproj.user/
+*.Rproj
+R/scratch/
+
+# macOS
+.DS_Store
+
+# Documents
+notes/
+
+# Claude
+.claude/
+CLAUDE.md
+/.quarto/
+**/*.quarto_ipynb

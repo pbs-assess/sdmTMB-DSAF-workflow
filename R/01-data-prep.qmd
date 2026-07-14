@@ -1,0 +1,182 @@
+---
+title: "1. Data Preparation"
+format: html
+execute:
+  echo: false      # hide code
+  warning: false    # hide warnings
+  message: false    # hide messages (e.g. package load chatter)
+---
+
+```{r}
+#| include: false
+knitr::opts_chunk$set(results = "hide")
+```
+
+```{r}
+# Setup
+library(dplyr)
+library(sdmTMB)
+library(ggplot2)
+library(terra)
+library(sf)
+
+source(here::here("R", "00-settings.R"))
+
+```
+
+### 1. Data preparation
+
+* Using placeholder statistically downscaled dataset for bottom temperature, and matched it to the survey grid (prediction grid). Median bottom temperature in June.
+
+* Combine temperature data with the dogfish survey records
+
+* Visual check: map dogfish observations and temperature patterns by year for the full survey and for one region (WCVI)
+
+```{r}
+# Prepare dogfish data, including temperature
+dog0 <- dogfish # from sdmTMB package
+dog <- dog0 |> mutate(log_depth = log(depth))
+
+# Scoped to the survey's historical year range for now (fitting only needs
+# observed years). `temp_dat0` actually holds columns for 2002-2099 across
+# climate scenarios (see comment below) - when forecasting is added, widen
+# this to the full projection year range (and select a scenario/percentile -
+# once more added) here and in `value_cols` below.
+historical_years <- min(dog$year):max(dog$year)
+
+# Trond dataset - processed by Sean:
+# - extracted data for 2002-2099 for one climate scenario for one month (june) and the 50th percentile value only, that works out to a ~70 mb .tif file
+# - interpolated it onto the synoptic grid using terra::extract() given the survey grid centroids
+# - 1 climate scenario at the median across the model ensemble
+temp_dat0 <- readRDS(file.path(data_raw_dir, "thetao_ensemble_sd+ba_bottom_perc_ssp126_p50_survey_blocks_active.rds"))
+
+grid_vect <- terra::vect(temp_dat0) # Convert temp_dat0 to terra SpatVector to be able to use `terra::extract()`
+empty_raster <- terra::rast(grid_vect, resolution = 2000) # Empty array that matches dim of temp_dat0
+
+# Subset temp_dat0 to only historical years (for efficiency)
+value_cols <- paste0("value_", historical_years, "_06") # (06 = June)
+temp_stack <- terra::rast(lapply(value_cols, \(v) {
+  terra::rasterize(grid_vect, empty_raster, field = v)
+}))
+names(temp_stack) <- historical_years
+
+dog_vect <- terra::vect(dog, geom = c("longitude", "latitude"), crs = "EPSG:4326") |>
+  terra::project(terra::crs(temp_stack))
+
+dog$bottom_temp <- terra::extract(
+  temp_stack,
+  dog_vect,
+  method = "bilinear",
+  layer = as.character(dog$year)
+)$value
+
+glimpse(dog)
+
+dog_sf <- dog |> sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+```
+
+```{r}
+#| label: wcvi-survey-set-bottom-temp
+
+ggplot(dog_sf) +
+  geom_sf(data = pacea::bc_coast) +
+  geom_sf(aes(colour = bottom_temp)) +
+  viridis::scale_colour_viridis(option = "plasma") +
+  facet_wrap(~ year) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 2)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Survey set bottom temperatures") +
+  viridis::scale_colour_viridis(
+    option = "plasma",
+    name = "Bottom temperature (°C)",
+    guide = guide_colourbar(
+      barwidth = unit(6, "cm"),
+      barheight = unit(0.4, "cm"),
+      title.vjust = 0.9,
+      direction = "horizontal"
+    )
+  ) +
+  gfplot::coord_sf_auto(dog_sf, buffer = 10000)
+```
+
+```{r}
+# Save covariate data to use when building prediction grids
+# - dp before we filter to WCVI, so we can scale up later
+# - keep `cell` (terra's integer cell index) alongside X/Y - temp_df and
+#   depth_df are built from separate as.data.frame() calls, and joining on
+#   the X/Y doubles later silently drops rows where the two don't compare
+#   exactly equal. `cell` is an exact integer key since both rasters share
+#   the same `empty_raster` template.
+# TODO: will need to replace with more complete depth layer;
+depth_rast <- terra::rasterize(grid_vect, empty_raster, field = "depth_m")
+survey_rast <- terra::rasterize(grid_vect, empty_raster, field = "survey_abbrev")
+
+depth_df <- terra::as.data.frame(c(depth_rast, survey_rast), xy = TRUE, cells = TRUE) |>
+  mutate(X = x / 1000, Y = y / 1000, log_depth = log(depth_m)) |>
+  select(cell, X, Y, depth_m, log_depth, survey_abbrev)
+
+# survey_abbrev doesn't vary by year, so attach it via a left_join on `cell`
+# (not filtering anything out here - just enriching every temp_df row so it
+# can be filtered to a region the same simple way as depth_df downstream).
+temp_df <- terra::as.data.frame(temp_stack, xy = TRUE, cells = TRUE) |>
+  tidyr::pivot_longer(-c(cell, x, y), names_to = "year", values_to = "bottom_temp") |>
+  mutate(year = as.integer(year), X = x / 1000, Y = y / 1000) |>
+  left_join(depth_df |> select(cell, survey_abbrev), by = "cell") |>
+  select(cell, X, Y, year, bottom_temp, survey_abbrev)
+```
+
+```{r}
+#| label: trond-bottom-temp
+
+# crop for faster plotting of WCVI only data
+wcvi_vect <- terra::vect(temp_dat0[temp_dat0$survey_abbrev == "SYN WCVI", ])
+wcvi_temp <- terra::crop(temp_stack, wcvi_vect, mask = TRUE)
+
+ggplot() +
+  tidyterra::geom_spatraster(data = wcvi_temp) +
+  geom_sf(data = pacea::bc_coast) +
+  facet_wrap(~lyr) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 2)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Oceanographic data: Median annual June bottom temperature") +
+  viridis::scale_fill_viridis(
+    option = "plasma",
+    name = "Bottom temperature (°C)",
+    na.value = "transparent",
+    guide = guide_colourbar(
+      barwidth = unit(6, "cm"),
+      barheight = unit(0.4, "cm"),
+      # title.position = "top",
+      title.vjust = 0.9,
+      direction = "horizontal"
+    )
+  ) +
+  gfplot::coord_sf_auto(dog_sf, buffer = 10000) # zoom into WCVI
+```
+
+### Save prepared data for species distribution modelling
+
+```{r}
+out_filename <- "dogfish.rds" # likely replace with species name from raw data
+
+# @TODO: ADD REGION
+
+# Objects saved
+# - cleaned survey data
+saveRDS(dog, file = file.path(model_input_dir, out_filename))
+
+# - temperature data grid (historical years only right now)
+saveRDS(temp_df, file = file.path(model_input_dir, "bottom-temperature-df.rds"))
+
+# - depth data grid
+saveRDS(depth_df, file = file.path(model_input_dir, "depth-df.rds"))
+
+```
+
+* Species survey data with covariate data (bottom temperature and depth) [data.frame]
+
+* Temperature for prediction grid [data.frame] (historical only right now; todo: add forecasting)
+
+* Depth for prediction grid [data.frame]
