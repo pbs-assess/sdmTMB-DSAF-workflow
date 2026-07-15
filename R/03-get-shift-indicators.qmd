@@ -57,7 +57,7 @@ sims_link <- predict(fit, newdata = pred_grid, type = "link", nsim = 200)
 
 * This is for 'full region', we can split the WCVI region into two polygons to workthrough multi-region indicators/presentation
 
-* Question: Need to be able to select by season?
+* Question: Need to be able to select by season? --> Yes if there is season
 
 ```{r}
 ggplot(pred_sf) +
