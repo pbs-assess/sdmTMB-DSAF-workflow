@@ -338,10 +338,14 @@ ggplot(data = avg_density_eao) +
 # @Question: I am mxing up whether to use link or response values - double check
 thresholds <- c(50, 75, 90, 95)
 
+# @TODO make sure that varying areas are not going to be problematic
 # @TODO if keeping; pull out and document
 get_area_thresholds <- function(df, thresholds) {
   df <- df |>
-    mutate(density = abundance / area) |> # make it explicit that we are ranking by density
+    # predict(..., offset = 0) returns density (biomass / 1 km^2);
+    # Rank by density, not abundance, so a cell's rank doesn't depend on its area
+    # - split cells carry unequal, non-4-km^2 areas
+    mutate(abundance = density * area) |>
     group_by(year) |> # @TODO add region
     arrange(year, desc(density)) |> # @TODO add region
     mutate(
@@ -369,7 +373,7 @@ get_area_thresholds <- function(df, thresholds) {
 
 sim_results <- purrr::map_dfr(seq_len(ncol(sims_combined_response)), \(i) {
   pred_grid |>
-    mutate(abundance = sims_combined_response[, i]) |>
+    mutate(density = sims_combined_response[, i]) |>
     get_area_thresholds(thresholds) |>
     mutate(sim = i)
 })
