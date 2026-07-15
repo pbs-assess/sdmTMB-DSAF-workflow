@@ -1,5 +1,5 @@
 ---
-title: "3. Shift Indicators & Results"
+title: "3. Historical Shift Indicators"
 format: html
 execute:
   echo: false     # hide code
@@ -156,7 +156,6 @@ prop_abundance_summary <- broom::tidy(trend_lm) |>
 #### Centre of gravity
 
 Abundance-weighted mean latitude and longitude of a species' distribution: describing the location of the centre of the distribution and reflecting shifts in this location over time
-
 ```{r get-cog}
 #| output: false
 #| cache: true
@@ -204,7 +203,6 @@ cog_summary <- bind_rows(
 
 cog_summary
 ```
-
 ```{r}
 #| fig-width: 7
 #| fig-height: 8
