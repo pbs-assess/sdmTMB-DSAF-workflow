@@ -17,10 +17,11 @@ knitr::opts_chunk$set(results = "hide")
 library(dplyr)
 library(sdmTMB)
 library(ggplot2)
-library(terra)
 library(sf)
 
 source(here::here("R", "00-settings.R"))
+
+# @TODO - Add some kind of CRS protection to make sure that with any of these spatial operations/conversions we are making the correct assumptions about CRS
 
 ```
 
@@ -37,12 +38,10 @@ source(here::here("R", "00-settings.R"))
 dog0 <- dogfish # from sdmTMB package
 dog <- dog0 |> mutate(log_depth = log(depth))
 
-# Scoped to the survey's historical year range for now (fitting only needs
-# observed years). `temp_dat0` actually holds columns for 2002-2099 across
-# climate scenarios (see comment below) - when forecasting is added, widen
-# this to the full projection year range (and select a scenario/percentile -
-# once more added) here and in `value_cols` below.
-historical_years <- min(dog$year):max(dog$year)
+# `temp_dat0` holds columns for 2002-2099 across climate scenarios (only 1 right now)
+# Choose years to extract temp data in
+# covariate_years <- min(dog$year):max(dog$year) # historical only
+covariate_years <- min(dog$year):2060 # Let's just do some forecasting to 2060 for now, could go to 2099
 
 # Trond dataset - processed by Sean:
 # - extracted data for 2002-2099 for one climate scenario for one month (june) and the 50th percentile value only, that works out to a ~70 mb .tif file
@@ -54,11 +53,11 @@ grid_vect <- terra::vect(temp_dat0) # Convert temp_dat0 to terra SpatVector to b
 empty_raster <- terra::rast(grid_vect, resolution = 2000) # Empty array that matches dim of temp_dat0
 
 # Subset temp_dat0 to only historical years (for efficiency)
-value_cols <- paste0("value_", historical_years, "_06") # (06 = June)
+value_cols <- paste0("value_", covariate_years, "_06") # (06 = June)
 temp_stack <- terra::rast(lapply(value_cols, \(v) {
   terra::rasterize(grid_vect, empty_raster, field = v)
 }))
-names(temp_stack) <- historical_years
+names(temp_stack) <- covariate_years
 
 dog_vect <- terra::vect(dog, geom = c("longitude", "latitude"), crs = "EPSG:4326") |>
   terra::project(terra::crs(temp_stack))
@@ -187,37 +186,37 @@ region_polys <- sf::st_read(
 # st_intersection() clips each cell to whichever rectangle(s) it overlaps;
 # cells straddling the N/S boundary get one row per region, each with its
 # own recalculated area.
-wcvi_region_lookup <- sf::st_intersection(wcvi_cell_polys, region_polys) |>
+wcvi_cell_region_polys <- sf::st_intersection(wcvi_cell_polys, region_polys) |>
   mutate(area = as.numeric(sf::st_area(geometry)) / 1e6) |> # km^2
   filter(area > 1e-6) |> # drop GEOS sliver artifacts along the split line
   group_by(cell, region, survey_abbrev) |>
   summarise(area = sum(area))
 
-# @CHECK - Why are there missing depths in Trond's dataset? We should probably grab these from Angelica's?
-# ggplot() +
-#   geom_sf(data = wcvi_region_lookup, aes(fill = region), colour = NA, alpha = 0.3) +
-#   geom_sf(data = depth_df0 |> XY_to_sf(), aes(colour = depth_m))
-
 depth_df0 |>  filter(is.na(depth_m)) |>  glimpse()
 
-# wcvi_region_lookup stays sf (needed for geometry downstream in `02`/plotting);
-# drop geometry here so the join doesn't leave depth_df/temp_df carrying an
-# orphaned sfc column that breaks dplyr verbs.
-region_lu_df <- sf::st_drop_geometry(wcvi_region_lookup)
+# Make prediction grid data.frame (store minimum amount of data in this object because it is expanded to all years)
+prediction_grid <- wcvi_cell_region_polys |> # @Note - cannot calculate these centroids because at this stage the polygons have been split by the regions
+  sf::st_drop_geometry() |>
+  mutate(
+    X = terra::xyFromCell(empty_raster, cell)[, "x"] / 1000, # @Note - this is centroid from raw grid
+    Y = terra::xyFromCell(empty_raster, cell)[, "y"] / 1000
+  ) |>
+  left_join(depth_df0 |> select(cell, depth_m, log_depth), by = "cell") |>
+  left_join(temp_df0 |> select(cell, year, bottom_temp), by = "cell", relationship = "many-to-many") |>
+  filter(!is.na(bottom_temp), !is.na(log_depth), !is.infinite(log_depth))
 
-depth_df <- depth_df0 |>
-  right_join(region_lu_df |> select(cell, region, area), by = "cell")
-temp_df <- temp_df0 |>
-  right_join(
-    region_lu_df |> select(cell, region),
-    by = "cell",
-    relationship = "many-to-many" # split cells (2 rows in wcvi_region_lookup) x every year (temp_df0)
-  )
+# Check prediction grid
+wcvi_cell_region_polys |>
+  select(cell, region, geometry) |>
+  left_join(
+    prediction_grid |> filter(year == max(dog$year) + 1),
+    by = c("cell", "region")
+  ) |>
+  ggplot() +
+  geom_sf(aes(fill = depth_m, colour = region)) # @CHECK - Why are there missing depths in Trond's dataset? We should probably grab these from Angelica's?
+  # geom_sf(aes(fill = bottom_temp, colour = region))
 
-# Checks to look at
-# ggplot() +
-#   geom_sf(data = depth_df |> st_as_sf(), aes(fill = depth_m, colour = region))
-  # geom_sf(data = temp_df |> st_as_sf(), aes(fill = bottom_temp, colour = region))
+unique(prediction_grid$year)
 
 ```
 
@@ -226,34 +225,20 @@ temp_df <- temp_df0 |>
 ```{r}
 out_filename <- "dogfish.rds" # likely replace with species name from raw data
 
-# @TODO - will need to add some kind of output check to make sure it matches some specification
-glimpse(dog)
-glimpse(temp_df)
-glimpse(depth_df)
-glimpse(wcvi_region_lookup)
-
 # Objects saved
 # - cleaned survey data
 saveRDS(dog, file = file.path(model_input_dir, out_filename))
 
-# - temperature data grid (historical years only right now)
-saveRDS(temp_df, file = file.path(model_input_dir, "bottom-temperature-df.rds"))
+# - minimize object sizes: rasterized cell polygons (keyed by `cell`/`region`)
+# - join downstream for plotting / sf uses
+saveRDS(wcvi_cell_region_polys, file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
-# - depth data grid
-saveRDS(depth_df, file = file.path(model_input_dir, "depth-df.rds"))
-
-# - rasterized cell polygons (keyed by `cell`/`region`) - downstream stages
-#   should join predictions back onto these by key rather than via a spatial
-#   join against the native survey block polygons, which don't necessarily
-#   align with the rasterized covariate grid.
-saveRDS(wcvi_region_lookup, file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
-
+# - prediction grid data.frame
+saveRDS(prediction_grid, file = file.path(model_input_dir, "prediction-grid.rds"))
 ```
 
 * Species survey data with covariate data (bottom temperature and depth) [data.frame]
 
-* Temperature for prediction grid [data.frame] (historical only right now; todo: add forecasting)
-
-* Depth for prediction grid [data.frame]
+* Prediction grid (depth + bottom temperature, all forecast years) [data.frame], keyed by `cell`/`region`
 
 * Rasterized cell polygons keyed by `cell`/`region` [sf], for joining predictions back to polygons for plotting
