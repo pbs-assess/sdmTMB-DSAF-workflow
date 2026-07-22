@@ -112,18 +112,20 @@ ggplot(dog_sf) +
 depth_rast <- terra::rasterize(grid_vect, empty_raster, field = "depth_m")
 survey_rast <- terra::rasterize(grid_vect, empty_raster, field = "survey_abbrev")
 
-depth_df <- terra::as.data.frame(c(depth_rast, survey_rast), xy = TRUE, cells = TRUE) |>
+depth_df0 <- terra::as.data.frame(c(depth_rast, survey_rast), xy = TRUE, cells = TRUE) |>
   mutate(X = x / 1000, Y = y / 1000, log_depth = log(depth_m)) |>
-  select(cell, X, Y, depth_m, log_depth, survey_abbrev)
+  select(cell, X, Y, depth_m, log_depth, survey_abbrev) |>
+  filter(survey_abbrev == "SYN WCVI")
 
 # survey_abbrev doesn't vary by year, so attach it via a left_join on `cell`
 # (not filtering anything out here - just enriching every temp_df row so it
 # can be filtered to a region the same simple way as depth_df downstream).
-temp_df <- terra::as.data.frame(temp_stack, xy = TRUE, cells = TRUE) |>
+temp_df0 <- terra::as.data.frame(temp_stack, xy = TRUE, cells = TRUE) |>
   tidyr::pivot_longer(-c(cell, x, y), names_to = "year", values_to = "bottom_temp") |>
   mutate(year = as.integer(year), X = x / 1000, Y = y / 1000) |>
-  left_join(depth_df |> select(cell, survey_abbrev), by = "cell") |>
-  select(cell, X, Y, year, bottom_temp, survey_abbrev)
+  left_join(depth_df0 |> select(cell, survey_abbrev), by = "cell") |>
+  select(cell, X, Y, year, bottom_temp, survey_abbrev) |>
+  filter(survey_abbrev == "SYN WCVI")
 ```
 
 ```{r}
@@ -156,12 +158,79 @@ ggplot() +
   gfplot::coord_sf_auto(dog_sf, buffer = 10000) # zoom into WCVI
 ```
 
+### Split WCVI into two example regions
+
+* Toy N/S split of the WCVI survey grid to work through multi-region indicators downstream. Regions are two rectangles (`R/make-wcvi-region-polygons.R`, saved as a shapefile in `data-raw/wcvi-region-polygons/`) buffered beyond the survey grid extent, so every WCVI cell falls fully inside one rectangle or the other.
+
+* Cells straddling the split line are cut in two by the split; each piece keeps the parent `cell` id but gets its own recalculated `area` (km2) and `region` label, so a split cell contributes one row per region downstream.
+
+```{r}
+#| label: wcvi-region-split
+cell_id_rast <- empty_raster
+names(cell_id_rast) <- "cell"
+terra::values(cell_id_rast) <- seq_len(terra::ncell(empty_raster))
+
+wcvi_cells <- depth_df0$cell[depth_df0$survey_abbrev == "SYN WCVI"]
+cell_id_rast[!(terra::values(cell_id_rast) %in% wcvi_cells)] <- NA
+
+wcvi_cell_polys <- terra::as.polygons(cell_id_rast, dissolve = FALSE) |>
+  sf::st_as_sf() |>
+  # Keeps surveys so they can be included as predictors if included in model as factor.
+  left_join(terra::as.data.frame(survey_rast, cells = TRUE), by = "cell")
+
+region_polys <- sf::st_read(
+  file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp"),
+  quiet = TRUE
+) |>
+  sf::st_transform(sf::st_crs(wcvi_cell_polys))
+
+# st_intersection() clips each cell to whichever rectangle(s) it overlaps;
+# cells straddling the N/S boundary get one row per region, each with its
+# own recalculated area.
+wcvi_region_lookup <- sf::st_intersection(wcvi_cell_polys, region_polys) |>
+  mutate(area = as.numeric(sf::st_area(geometry)) / 1e6) |> # km^2
+  filter(area > 1e-6) |> # drop GEOS sliver artifacts along the split line
+  group_by(cell, region, survey_abbrev) |>
+  summarise(area = sum(area))
+
+# @CHECK - Why are there missing depths in Trond's dataset? We should probably grab these from Angelica's?
+# ggplot() +
+#   geom_sf(data = wcvi_region_lookup, aes(fill = region), colour = NA, alpha = 0.3) +
+#   geom_sf(data = depth_df0 |> XY_to_sf(), aes(colour = depth_m))
+
+depth_df0 |>  filter(is.na(depth_m)) |>  glimpse()
+
+# wcvi_region_lookup stays sf (needed for geometry downstream in `02`/plotting);
+# drop geometry here so the join doesn't leave depth_df/temp_df carrying an
+# orphaned sfc column that breaks dplyr verbs.
+region_lu_df <- sf::st_drop_geometry(wcvi_region_lookup)
+
+depth_df <- depth_df0 |>
+  right_join(region_lu_df |> select(cell, region, area), by = "cell")
+temp_df <- temp_df0 |>
+  right_join(
+    region_lu_df |> select(cell, region),
+    by = "cell",
+    relationship = "many-to-many" # split cells (2 rows in wcvi_region_lookup) x every year (temp_df0)
+  )
+
+# Checks to look at
+# ggplot() +
+#   geom_sf(data = depth_df |> st_as_sf(), aes(fill = depth_m, colour = region))
+  # geom_sf(data = temp_df |> st_as_sf(), aes(fill = bottom_temp, colour = region))
+
+```
+
 ### Save prepared data for species distribution modelling
 
 ```{r}
 out_filename <- "dogfish.rds" # likely replace with species name from raw data
 
-# @TODO: ADD REGION
+# @TODO - will need to add some kind of output check to make sure it matches some specification
+glimpse(dog)
+glimpse(temp_df)
+glimpse(depth_df)
+glimpse(wcvi_region_lookup)
 
 # Objects saved
 # - cleaned survey data
@@ -173,6 +242,12 @@ saveRDS(temp_df, file = file.path(model_input_dir, "bottom-temperature-df.rds"))
 # - depth data grid
 saveRDS(depth_df, file = file.path(model_input_dir, "depth-df.rds"))
 
+# - rasterized cell polygons (keyed by `cell`/`region`) - downstream stages
+#   should join predictions back onto these by key rather than via a spatial
+#   join against the native survey block polygons, which don't necessarily
+#   align with the rasterized covariate grid.
+saveRDS(wcvi_region_lookup, file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
+
 ```
 
 * Species survey data with covariate data (bottom temperature and depth) [data.frame]
@@ -180,3 +255,5 @@ saveRDS(depth_df, file = file.path(model_input_dir, "depth-df.rds"))
 * Temperature for prediction grid [data.frame] (historical only right now; todo: add forecasting)
 
 * Depth for prediction grid [data.frame]
+
+* Rasterized cell polygons keyed by `cell`/`region` [sf], for joining predictions back to polygons for plotting
