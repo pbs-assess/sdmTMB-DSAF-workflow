@@ -190,15 +190,19 @@ wcvi_cell_region_polys <- sf::st_intersection(wcvi_cell_polys, region_polys) |>
   mutate(area = as.numeric(sf::st_area(geometry)) / 1e6) |> # km^2
   filter(area > 1e-6) |> # drop GEOS sliver artifacts along the split line
   group_by(cell, region, survey_abbrev) |>
-  summarise(area = sum(area))
+  summarise(area = sum(area), .groups = "drop")
 
 depth_df0 |>  filter(is.na(depth_m)) |>  glimpse()
 
-# Make prediction grid data.frame (store minimum amount of data in this object because it is expanded to all years)
-prediction_grid <- wcvi_cell_region_polys |> # @Note - cannot calculate these centroids because at this stage the polygons have been split by the regions
+# Make prediction grid data.frame (keep this object lean because it is expanded to all years)
+prediction_grid <- wcvi_cell_region_polys |>
   sf::st_drop_geometry() |>
   mutate(
-    X = terra::xyFromCell(empty_raster, cell)[, "x"] / 1000, # @Note - this is centroid from raw grid
+    # @Note - centroids must come from the original (unsplit) raster grid:
+    # cells straddling the N/S split line are cut into two region polygons,
+    # so a centroid taken from the split polygon would be off-center from
+    # the true cell
+    X = terra::xyFromCell(empty_raster, cell)[, "x"] / 1000,
     Y = terra::xyFromCell(empty_raster, cell)[, "y"] / 1000
   ) |>
   left_join(depth_df0 |> select(cell, depth_m, log_depth), by = "cell") |>
@@ -231,6 +235,7 @@ saveRDS(dog, file = file.path(model_input_dir, out_filename))
 
 # - minimize object sizes: rasterized cell polygons (keyed by `cell`/`region`)
 # - join downstream for plotting / sf uses
+# @TODO: might make sense to make this a standard filename
 saveRDS(wcvi_cell_region_polys, file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
 # - prediction grid data.frame
