@@ -7,6 +7,7 @@ data-generated/
 *.html
 *_files/
 *_cache/
+*.pdf
 *.rmarkdown
 _quarto.yml
 

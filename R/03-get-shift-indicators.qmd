@@ -1,8 +1,14 @@
 ---
-title: "3. Historical Shift Indicators"
-format: html
+title: "3. Shift Indicators"
+format:
+  pdf:
+    code-overflow: wrap
+    include-in-header:
+      text: |
+        \usepackage{fvextra}
+        \fvset{breaklines,breakanywhere}
 execute:
-  echo: false     # hide code
+  # echo: false     # hide code
   warning: false  # hide warnings
   message: false  # hide messages
 ---
@@ -15,237 +21,715 @@ library(sdmTMB)
 library(ggplot2)
 library(sf)
 library(patchwork)
+library(broom)
+library(kableExtra)
 
 source(here::here("R", "00-settings.R"))
+source(here::here("R", "functions.R"))
 ```
 
+Three objects feed `02-fit-model.qmd` and `03-get-shift-indicators.qmd`. All are
+built in `01-data-prep.qmd` and cached to disk so downstream scripts can
+`readRDS()`/`st_read()` them.
+
 ```{r load-model-outputs}
-#| include: false
-#| cache: true
-#| cache.extra: !expr file.mtime(c(file.path(model_out_dir, "fits", "dogfish.rds"), file.path(model_out_dir, "predictions", "dogfish.rds"), file.path(model_out_dir, "predictions-sf", "dogfish.rds")))
+fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
+```
 
-fit <- readRDS(file.path(model_out_dir, "fits", paste0("dogfish", ".rds")))
+**1. `fit` - sdmTMB model output**
 
-# @TODO: Setup so the two dependencies are:
-# 1) fit
-# 2) prediction grid with regions column
-predictions <- readRDS(file.path(model_out_dir, "predictions", paste0("dogfish", ".rds")))
+* This is something that should be able to be recalculated from the data
+inputs because reloading `sdmTMB` objects built with older versions of `sdmTMB`
+break
 
-pred_sf0 <- readRDS(file.path(model_out_dir, "predictions-sf", paste0("dogfish", ".rds"))) # @NOTE THIS RIGHT NOW has the combined estimate
-# @TODO: might be kind of confusing to have these outputs be different
-
-# filter(pred_sf0, is.na(est_combined))
-pred_sf <- pred_sf0 |>  filter(!is.na(bottom_temp) | !is.na(log_depth)) # these are grid cells that did not have covariate data
+* Note - the script below assumes that the model was not fit with projections and
+that instead, projections are done here using `project()`. This could be adjusted.
 
 
-# Simulated predictions
-pred_grid <- predictions$data |> select(X, Y, year, bottom_temp, log_depth, survey_abbrev, area)
+**2. `prediction_grid` — plain data.frame, no geometry**
 
-# @CHECK: I think we need this for getting area occupied?
-set.seed(1)
-sims_combined_response <- predict(fit, newdata = pred_grid, type = "response", nsim = 200, model = NA) # sims: matrix, nrow(nd) x 200 — response-scale combined abundance
-head(sims_combined_response) #remind myself what this looks like
+```{r}
+prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
+head(prediction_grid)
+```
 
-# @CHECK: But we need this for get_range_edge?
-sims_link <- predict(fit, newdata = pred_grid, type = "link", nsim = 200)
+One row per `cell` x `region` x `year`. This is the `newdata` passed to
+`predict()`/`simulate()`/`project()`, so it carries covariates.
+All covariates that are in the model should be in this grid.
+Rows with missing/infinite depth or missing covariate (temperature) are dropped
+upstream, so `NA` covariates shouldn't appear here.
+
+*Minimum required* — every `newdata` grid needs these regardless of model
+(key, coordinates, area weighting, and the time index):
+
+| column   | type    | notes                                            |
+|----------|---------|--------------------------------------------------|
+| `cell`   | numeric | grid cell id (raster cell number)                |
+| `region` | chr     | `"WCVI N"` / `"WCVI S"`                          |
+| `X`, `Y` | numeric | cell centroid, km, UTM 9N                        |
+| `area`   | numeric | cell area, km² (recalculated for split cells)    |
+| `year`   | int     | survey year or forecast year                     |
+
+*Model-specific covariates* — depend on the fitted formula, included here
+because this model uses depth and bottom temperature:
+
+| column          | type    | notes                                                 |
+|-----------------|---------|-------------------------------------------------------|
+| `survey_abbrev` | factor  | survey id for each grid cell (not actually used here) |
+| `depth_m`       | numeric | bottom depth, m                                       |
+| `log_depth`     | numeric | `log(depth_m)`                                        |
+| `bottom_temp`   | numeric | bottom temperature covariate, °C                      |
+
+For example in the dogfish demo:
 
 
-# WARNING! I fear that utm zones will bite me later - make sure to set this up safely
+**3. `cell_polygons` — sf object, one row per cell x region**
+```{r}
+cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
+cell_polygons |> head()
+```
+
+* I think this is useful for plotting because we can use `sf` ggplot2 methods
+
+* Same key/covariate columns as `prediction_grid` minus the per-year fields
+(`year`, `bottom_temp`), plus the polygon `geometry`. This is what you
+`left_join()` predictions back onto for mapping (see `pred_poly` in
+`02-fit-model.qmd`).
+
+| column          | type       | notes                                           |
+|-----------------|------------|-------------------------------------------------|
+| `cell`          | numeric    | grid cell id                                    |
+| `region`        | chr        | region names                                    |
+| `survey_abbrev` | factor     | survey names                                    |
+| `area`          | numeric    | cell area, km²                                  |
+| `geometry`      | POLYGON sf | cell footprint, CRS UTM, but could be different |
+
+3,520 rows.
+
+**4. `region_polys` — sf object, one row per region**
+
+```{r}
+region_polys <- sf::st_read(
+  file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp"),
+  quiet = TRUE
+)
+
+region_polys
+```
+
+The two N/S polygons from a shapefile used to split the WCVI grid (built by
+`R/make-wcvi-region-polygons.R`).
+Used for overlay in maps (`geom_sf`) and to derive region boundary lines,
+not for per-cell joins.
+Was used in `R/01-data-prep.R` to split the 'all' grid into regions.
+
+| column     | type       | notes                                |
+|------------|------------|--------------------------------------|
+| `region`   | chr        | region name                          |
+| `geometry` | POLYGON sf | buffered bounding rectangle, UTM 9N  |
+
+
+### Data preparation
+```{r}
+# Get line segments for region borders to declutter plots downstream
+region_borders <- get_region_borders(region_polys)
+
+# Separate into historical and forecast grids based on data used in model object
+# (assumes projections not included in model)
+historical_grid <- prediction_grid |> filter(year %in% min(fit$data$year):max(fit$data$year))
+forecast_grid   <- prediction_grid |> filter(year > max(fit$data$year))
+
+has_forecast <- nrow(forecast_grid) > 0L # ignore forecasting if no forecast data
+
+last_historical_year <- max(historical_grid$year) # use for centring so no ambiguity in lm trend intercept
+```
+
+```{r questions}
+#| echo: false
+# Predictions conditioned on best estimate of random effects
+# @Question - what words/phrasing do I use to describe the predictions using
+# nsim = 0 vs nsim >0? expected values given best MLEs of both fixed and random
+# effects vs simulated prediction draws sampled from joint precision matrix?
+# @Question - Should we just be using OSP draws of random effects for all of
+# the shift indicators? The problem right now is we need to use a one sample
+# posterior draw of random effects NOT the joint precision matrix to avoid biased
+# estimate, correct? And the mechanics of doing this would be that we need to
+# use `simulate_new()`(?) to get our draws and manually take our own OSP? Can we
+# do this with project and supply the OSP?
+
+# See: https://github.com/sdmTMB/sdmTMB/discussions/431#discussioncomment-12717246
+# See: https://github.com/sdmTMB/sdmTMB/discussions/431
+
+# We are not currently simulating from the spatial random effects (i.e., not
+# accounting for uncertainty in the sp rf) - worth asking Andrew - may also be
+# in the fish and fisheries paper (this is the first `0` in the sim_re)
+
+```
+
+Generate simulated draws; right now separately done using `simulate()` for the
+historical data and `project()` for forecasts. No observation error included.
+
+```{r}
+historical_sim_preds <- simulate(
+  fit,
+  newdata = historical_grid, # reminder to myself --> can only do time elements included in fitting
+  type = "mle-mvn", # fixed effects are at their MLEs but random effects are taken from a single approximate sample
+  mle_mvn_samples = "multiple", # take an MVN draw from the random effects for each of the nsim.
+  nsim = 50, #@TODO - will update this to argument passed above so we only need to change once
+  observation_error = FALSE, # see note below about safety of log(density) and returning 0 values
+  model = NA,
+  re_form = NULL # NULL to specify a simulation conditional on fitted random
+  # effects (this only simulates observation error). ~0 or NA to simulate new
+  # random effects
+) # returns response scale values
+
+glimpse(historical_sim_preds)
+
+historical_sims <- historical_grid |>
+  mutate(time_period = "historical") |>
+  bind_cols(
+  # log density to match input into get_index_sims; and so that addition of
+  # offset can be calculated in logspace - not sure this actually makes any difference...
+    as_tibble(log(historical_sim_preds), .name_repair = ~ paste0("sim", seq_along(.x)))
+  )
+# @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
+
+
+# @TODO: deal with handling delta models
+if (has_forecast) { # @TODO - make sure this is working
+  projections <- project(
+    fit,
+    newdata = forecast_grid, # @Question - does it make any difference to do on the full prediction grid and then filter to only the forecast years or just use forecast grid? Is this needed to 'connect' each draw to past? Probably not right? because we are treating forecasts separately and summarising the simulated draws anyway. Like if we fix the seed to match in the historical and the forecast project, will the sims 'line up'?
+    sims_vars = "eta_i", #@FIXME - I think this is also not working right - it shouldn't be grabbing espilon_st right?
+    sim_re = c(0, 1, 0, 0, 1, 0), #@Check - ask andrew if there is a reason default is no sampling from spatial RF (and are there problematic implications with us not doing this for using the nsim > 0 methods? Using these as estimated at their best MLEs from joint if = 0? -in this dogfish demo - note that the spatial field collapsed so it has been turned off anyway)
+    nsim = 50,
+    uncertainty = "random",
+    model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
+  ) # returns values in link space
+  meep() # you can add your username if you find this function helpful (custom beepr::beep() to ping for specific users)
+
+  # @hack to deal with returning of each delta model estimate
+  if (fit$family$delta) {
+    projections$est <- fit$family[[1]]$linkinv(projections$est1) * fit$family[[2]]$linkinv(projections$est2)
+  }
+
+  forecast_sims <- forecast_grid |>
+    mutate(time_period = "forecast") |>
+    bind_cols(
+      as_tibble(log(projections$est), .name_repair = ~ paste0("sim", seq_along(.x)))
+    )
+} else {
+  forecast_sims <- NULL
+}
+
+# @TODO: use data.table because these matrices can be kind of big
+# - see: https://github.com/pbs-assess/dogfish-trends/blob/9e472c7e5202cd232d2035038b41f28df0ddfba0/analysis/016-calculate-weighted-mean-depth.R#L55 onwards for example
+
+# @optimize For larger datasets working with lots of sims could be slow - convert to datatable
+sims <- bind_rows(historical_sims, forecast_sims) |>
+  tidyr::pivot_longer(
+    cols = starts_with("sim"),
+    names_to = "sim",
+    names_pattern = "^sim(\\d+)",
+    names_transform = list(sim = as.integer),
+    values_to = "log_density" # assuming offset = 1km2 (log(offset) = 0 used in prediction)
+  ) |>
+  mutate(
+    time_period = factor(time_period, levels = c("historical", "forecast")),
+    log_abundance = log_density + log(area) # add area in logspace like get_index_sims()
+  )
+
+sims_with_total <- bind_rows(sims, sims |> mutate(region = "all")) # This way total and regions processed in single step
+
+```
+
+Visualise the species distributions for the historical and full series.
+```{r pred-map-historical}
+#| fig-width: 8
+#| fig-height: 13
+
+# Predicted values plot
+# @TODO - add bathymetric layer
+sims |>
+  filter(time_period == "historical") |>
+  group_by(time_period, year, cell, region) |>
+  # filter(sim == 3) |>
+  summarise(log_density = median(log_density)) |>
+  left_join(cell_polygons, y = _) |>
+  tidyr::drop_na(log_density) |>
+ggplot() +
+  geom_sf(aes(fill = exp(log_density), colour = exp(log_density))) +
+  scale_fill_viridis_c(option = "plasma") +
+  scale_colour_viridis_c(option = "plasma") +
+  # scale_fill_viridis_c(trans = "log10", option = "plasma") +
+  # scale_colour_viridis_c(trans = "log10", option = "plasma") +
+  geom_sf(data = region_polys, fill = NA, linewidth = 0.5) +
+  facet_wrap(~ year, ncol = 3) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+```
+
+```{r pred-map-full-series}
+#| fig-width: 9
+#| fig-height: 13
+
+sims |>
+  # filter(time_period == "forecast") |>
+  # filter(year %in% seq(last_historical_year + 1, 2060, by = 2)) |>
+  filter(year %in% seq(2005, 2060, by = 2)) |>
+  group_by(time_period, year, cell, region) |>
+  # filter(sim == 3) |>
+  summarise(log_density = median(log_density)) |>
+  left_join(cell_polygons, y = _) |>
+  tidyr::drop_na(log_density) |>
+ggplot() +
+  geom_sf(aes(fill = exp(log_density), colour = exp(log_density))) +
+  scale_fill_viridis_c(option = "plasma") +
+  scale_colour_viridis_c(option = "plasma") +
+  # scale_fill_viridis_c(trans = "log10", option = "plasma") +
+  # scale_colour_viridis_c(trans = "log10", option = "plasma") +
+  geom_sf(data = region_polys, fill = NA, linewidth = 0.5) +
+  facet_wrap(~ year, ncol = 4) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+```
+
+```{r pred-cell-sf}
+# For plotting background - make predictions into sf object
+pred_cell_sf <- sims |>
+  group_by(time_period, year, cell, region) |>
+  summarise(density_km2 = exp(median(log_density)), .groups = "drop") |>
+  left_join(cell_polygons, y = _) |>
+  tidyr::drop_na(density_km2)
 ```
 
 ### 3. Get shift indicators
 
-* This is for 'full region', we can split the WCVI region into two polygons to workthrough multi-region indicators/presentation
+Below returns shift indicators by:
 
-* Question: Need to be able to select by season? --> Yes if there is season
+* time period (historical vs forecast)
+* region (subregions and full domain ["all"])
 
-```{r}
-ggplot(pred_sf) +
-    geom_sf(aes(fill = est_combined, colour = est_combined)) +
-    viridis::scale_fill_viridis(trans = "log10") +
-    viridis::scale_colour_viridis(trans = "log10") +
-    facet_wrap(~ year) +
-    scale_x_continuous(breaks = scales::pretty_breaks(n = 2)) +
-    scale_y_continuous(breaks = scales::pretty_breaks(n = 2)) +
-    ggtitle("Predicted distribution of Pacific Spiny Dogfish (WCVI)")
-```
+This could be extended to included additional groupings - e.g., season. We could
+define a grouping vector above in the data prep.
 
 #### Abundance trend
 
-Trend in total and regional abundance or biomass over time as estimated by the model: describing the size of a population in terms of the relative number or total weight of individuals
+Trend in total and regional abundance or biomass over time as estimated by the
+model: describing the size of a population in terms of the relative number or
+total weight of individuals
 
 * For dogfish we're modelling biomass (not abundance)
 
 ```{r abundance}
-# @TODO include by region
-# @TODO - I guess we will want to have a set of calculations for each index across the full modelled region and then also the subsets?
-abundance0 <- get_index(predictions, bias_correct = TRUE, area = predictions$data$area) # @Note: safest if area is included in predictions data (i.e., if area varies)
-abundance <- abundance0 |>
-  mutate(centred_year = year - mean(year))
+# @TODO: for lm trends, we aren't accounting for the AR1 process or propagating
+# uncertainty - or are we now doing this that we've moved to using nsims > 0?
+# @Question: what should we be presenting as units for abundance trend summary dataframe?
+# @Question: should we be summarising by mean to match E(X) with bias correction?
+# Or median? Or doesn't matter since we're only looking at trends?
 
-trend_lm <- lm(log(est) ~ centred_year, data = abundance)
-summary(trend_lm)
-# @TODO: get_index() returns a per-year se but we aren't accounting for the AR1 process when we fit the lm. What is the best solution?
-# @Question: error propagation: is one strategy to calculate trends for each nsim to propagate uncertainty of annual estimates? (doesn't account for AR1, or does it?)
-# @Question: worth using variance weighting in lm() for now?
-# @Note: missing years/alternating years/seesaw - from what I saw in power analysis, is this going to be a problem here? see note in diagnostics section of @R/02-fit-model.qmd
-# @Question: what should we be presenting as units for abundance trend summary?
+# for my reference
+# get_index_sims does:
+  # est_function = stats::median()
+  # area_function = function(x, area) x + log(area)
+  # agg_function = function(x) sum(exp(x)) - because values must come logged
 
-abundance_summary <- broom::tidy(trend_lm) |>
+# Calculate annual abundance for each simulated draw
+a_by_sim <- sims_with_total |>
+  group_by(time_period, region, year, sim) |>
+  summarise(x = sum(exp(log_abundance)), .groups = "drop")
+
+a_by_region <- a_by_sim |>
+  group_by(time_period, region, year) |>
+  summarise(
+    est = stats::median(x),
+    lwr = stats::quantile(x, probs = 0.025),
+    upr = stats::quantile(x, probs = 0.975),
+    se = stats::sd(log(x)),
+    log_est = mean(log(x))
+  )
+
+abund_lm_by_sim <- a_by_sim |>
+  mutate(centred_year = year - last_historical_year) |>
+  group_by(time_period, region, sim) |>
+  summarise(slope = coef(lm(log(x) ~ centred_year))[["centred_year"]],
+            .groups = "drop") |>
+  group_by(time_period, region) |>
+  summarise(
+    estimate = median(slope),
+    se       = sd(slope),
+    lwr      = quantile(slope, 0.025),
+    upr      = quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)), # don't floor for now
+    # prob_direction  = max(2 * min(mean(slope > 0), mean(slope < 0)), 1 / length(slope)),  # @Question - worth including? do floor?
+    .groups  = "drop"
+  )
+
+abund_lm_by_sim_summary <- abund_lm_by_sim |>
+  transmute(
+    indicator = "abundance",
+    name = "Abundance Trend",
+    region = region,
+    time_period = time_period,
+    estimate,
+    se = se,
+    lwr = lwr,
+    upr = upr,
+    prob_direction,
+    units = "log(biomass) / year" # @TODO: generalise the units
+  )
+abundance_summary <- abund_lm_by_sim_summary
+
+```
+
+
+```{r compare-with-get-index-sims}
+# |eval: false
+# |echo: false
+# Just a comparison of two methods to make sure I have coded things correctly
+test <- get_index_sims(log(historical_sim_preds), area = historical_grid$area)
+test
+
+# Yay!!! They match!
+ggplot() +
+  aes(x = year, y = est, ymin = lwr, ymax = upr) +
+  geom_line(data = filter(a_by_region, time_period == "historical", region == "all"), linewidth = 2, colour = "red") +
+  geom_ribbon(data = filter(a_by_region, time_period == "historical", region == "all"), alpha = 0.2, fill = "red") +
+  geom_line(data = test) +
+  geom_ribbon(data = test, alpha = 0.2, colour = "black") +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3)) +
+  labs(y = expression("Abundance index"~(x*10^3)))
+
+# hist_max <- max(a_total$upr[a_total$year <= last_historical_year])
+ggplot(data = filter(a_by_region, region == "all")) +
+  aes(x = year, y = est, ymin = lwr, ymax = upr) +
+  geom_ribbon(alpha = 0.3) +
+  geom_line() +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3)) +
+  coord_cartesian(expand = FALSE) +
+  labs(y = expression("Abundance index"~(x*10^3))) +
+  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey50")
+
+a_region_lm <- a_by_region |>
+  mutate(centred_year = year - last_historical_year) |>
+  group_by(region, time_period) |>
+  group_split() |>
+  purrr::map_dfr(\(x) {
+      fit_lm <- lm(log(est) ~ centred_year, data = x)
+      # print(summary(fit_lm))
+      broom::tidy(fit_lm) |>
+        mutate(
+          time_period = unique(x$time_period),
+          region = unique(x$region))
+    }
+  )
+
+abundance_summary_og <- a_region_lm |>
   filter(term == "centred_year") |>
   transmute(
     indicator = "abundance",
     name = "Abundance Trend",
+    region = region,
+    time_period = time_period,
     estimate,
     se = std.error,
     units = "log(biomass) / year", # @TODO: generalise the units
     p_value = p.value
   )
 
-abundance_summary
-
-
-# Abundance trend plot
-
-ggplot(data = abundance) +
-  aes(x = year, y = est, ymin = lwr, ymax = upr) +
-  geom_line() +
-  geom_ribbon(alpha = 0.3)
-
-# Thought lognormal might make the index a bit less messy; I guess not.
+abundance_summary_og
+abund_lm_by_sim_summary
 ```
 
 #### Proportional abundance
 
-The percentage of the total abundance/biomass that falls within a given region. Indicates changes in the relative contribution of a region to the overall abundance/biomass.
+The percentage of the total abundance/biomass that falls within a given region.
+Indicates changes in the relative contribution of a region to the overall abundance/biomass.
 
 ```{r proportional-abundance}
-# For proportion of total abundance --------------------------------------------
-# @Question: best way to propagate uncertainty, since this is a ratio of two estimates? using nsim from same seed comparison?
+# @Question: best way to propagate uncertainty, since this is a ratio of two estimates? using nsim from same seed comparison does this?
 # - should we be getting the ratio from the nsim values?
-total_abundance0 <- get_index(predictions, bias_correct = TRUE, area = predictions$data$area)
-total_abundance <- total_abundance0 |> select(year, total_est = est)
+totals_by_sim <- a_by_sim |>
+  filter(region == "all") |>
+  select(time_period, year, sim, x_all = x)
 
-prop_abundance_df <- left_join(abundance, total_abundance) |>
-  mutate(prop_abundance = est / total_est)
+p_abund_by_sim <- a_by_sim |>
+  filter(region != "all") |>
+  left_join(totals_by_sim, by = c("time_period", "year", "sim")) |>
+  mutate(prop = x / x_all)
 
-# @TODO: use qlogis as temporary solution once actually dealing with ration != 1; may want to consider something else, betareg?
-prop_abundance_lm <- lm(prop_abundance ~ centred_year, data = prop_abundance_df)
-# prop_abundance_lm <- lm(qlogis(prop_abundance) ~ centred_year, data = prop_abundance_df) # logit transform for now
+p_abund <- p_abund_by_sim |>
+  group_by(time_period, region, year) |>
+  summarise(
+    est = stats::median(prop),
+    lwr = stats::quantile(prop, probs = 0.025),
+    upr = stats::quantile(prop, probs = 0.975)
+  ) |>
+  mutate(centred_year = year - last_historical_year)
 
+ggplot(data = p_abund) +
+  aes(x = year, y = est, ymin = lwr, ymax = upr, colour = region, fill = region, group = region) +
+  geom_line() +
+  geom_ribbon(alpha = 0.3, colour = NA) +
+  ggthemes::scale_colour_ptol() +
+  ggthemes::scale_fill_ptol() +
+  coord_cartesian(expand = FALSE) +
+  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey50") #+
+  # facet_wrap(time_period ~ ., ncol = 1, scales = "free_x")
 
-# @TODO: add uncertainty
-prop_abundance_df |>
-  ggplot() +
-  aes(x = year, y = prop_abundance) +
-  geom_line()
+p_abund_lm <- p_abund |>
+  group_by(time_period, region) |>
+  group_split() |>
+  purrr::map_dfr(\(x) {
+    fit_lm <- lm(qlogis(est) ~ centred_year, data = x) # @Question: use qlogis? something else?
+    broom::tidy(fit_lm) |>
+      mutate(
+        time_period = unique(x$time_period),
+        region = unique(x$region)
+      )
+  })
 
-prop_abundance_summary <- broom::tidy(trend_lm) |>
-  filter(term == "centred_year") |>
-  transmute(
-    indicator = "proportional-abundance",
-    name = "Proportional Abundance Trend",
-    estimate,
-    se = std.error,
-    units = "proportion of total abundance / year", # @TODO: convert to percent?
-    p_value = p.value
+# @Question should we modellng historical and forecast trend all in one model?
+# @Question - should we be expecting similar estimates for the Intercepts within each region since they're centred on the last historical year?
+#   [main* ↑] p_abund_lm
+# # A tibble: 8 × 7
+#   term         estimate std.error statistic  p.value time_period region
+#   <chr>           <dbl>     <dbl>     <dbl>    <dbl> <fct>       <chr>
+# 1 (Intercept)   0.303    0.0416        7.29 1.26e- 6 historical  WCVI N
+# 5 (Intercept)   0.405    0.0182       22.3  1.15e-22 forecast    WCVI N
+# 3 (Intercept)   0.697    0.0416       16.7  5.34e-12 historical  WCVI S
+# 7 (Intercept)   0.595    0.0182       32.8  2.12e-28 forecast    WCVI S
+
+# @CHECK - example by sim
+p_abund_lm_by_sim <- p_abund_by_sim |>
+  mutate(centred_year = year - last_historical_year) |>
+  group_by(time_period, region, sim) |>
+  summarise(slope = coef(lm(qlogis(prop) ~ centred_year))[["centred_year"]],
+            .groups = "drop") |>
+  group_by(time_period, region) |>
+  summarise(
+    estimate = median(slope),
+    se       = sd(slope),
+    lwr      = quantile(slope, 0.025),
+    upr      = quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)),  # @Question - is this worth including?
+    .groups  = "drop"
   )
+
+# compared point estimate lm with sim version
+p_abund_lm |> filter(term == "centred_year") |>
+  select(time_period, region, estimate, std.error, statistic, p.value)
+p_abund_lm_by_sim # Looking at the plot these results make more sense given the crazy uncertainty around the forecasted proportion of abundances
+
+prop_abundance_summary <- p_abund_lm_by_sim |>
+  # filter(term == "centred_year") |>
+  transmute(
+    indicator = "prop_abundance",
+    name = "Proportional Abundance Trend",
+    region = region,
+    time_period = time_period,
+    estimate,
+    se,
+    lwr,
+    upr,
+    prob_direction,
+    units = "" # @Question - halp, thinking in log-odds changes; additional option could be present as percent over time periods?
+  )
+
+prop_abundance_summary
+
+# @Question - symmetry is good sign because change in proportion should be zero-sum; does that however have implications for how we model the trend?
+# [main* ↑] prop_abundance_summary
+# # A tibble: 4 × 10
+#   indicator      name                         region time_period estimate     se     lwr    upr p_value units
+#   <chr>          <chr>                        <chr>  <fct>          <dbl>  <dbl>   <dbl>  <dbl>   <dbl> <chr>
+# 1 prop_abundance Proportional Abundance Trend WCVI N historical  -0.0280  0.0254 -0.0842 0.0110    0.12 ""
+# 2 prop_abundance Proportional Abundance Trend WCVI S historical   0.0280  0.0254 -0.0110 0.0842    0.12 ""
+# 3 prop_abundance Proportional Abundance Trend WCVI N forecast    -0.00567 0.0440 -0.0827 0.0810    0.84 ""
+# 4 prop_abundance Proportional Abundance Trend WCVI S forecast     0.00567 0.0440 -0.0810 0.0827    0.84 ""
 
 ```
 
 #### Centre of gravity
 
 Abundance-weighted mean latitude and longitude of a species' distribution: describing the location of the centre of the distribution and reflecting shifts in this location over time
+
+For reference from Thorson, Pinsky, & Ward 2016:
+$$
+\text{Latitude}_{\text{COG}} = \frac{\sum_{i=1}^{n_s} \hat{d}(s_i) \cdot \text{Latitude}(s_i)}{\sum_{i=1}^{n_s} \hat{d}(s_i)} \qquad (\text{eqn } 2)
+$$
+
+where:
+* $n_s$ is the number of locations (e.g., grid cells) used to summarize a spatial domain,
+* $\hat{d}(s_i)$ is the predicted density at location $s_i$, and
+* $\text{Latitude}(s_i)$ is the latitude for location $s_i$.
+
+BUT - prediction grid could have unequal cell areas, so we weight by abundance $= \hat{d}(s_i) \times A_i$ (predicted density $\times$ cell area) :
+$$
+\text{X}_{\text{COG}} = \frac{\sum_{i=1}^{n_s} \hat{d}(s_i) \times A_i \times \text{X}(s_i)}{\sum_{i=1}^{n_s} \hat{d}(s_i) \times A_i} \qquad \text{Y}_{\text{COG}} = \frac{\sum_{i=1}^{n_s} \hat{d}(s_i) \times A_i \times \text{Y}(s_i)}{\sum_{i=1}^{n_s} \hat{d}(s_i) \times A_i}
+$$
+
+* $\text{X}(s_i)$ is the UTM Easting (longitude) for location $s_i$.
+* $\text{Y}(s_i)$ is the UTM Northing (latitude) for location $s_i$.
+* $\text{A}(s_i)$ is the Area for location $s_i$.
+* $\text{abundance} = \hat{d}(s_i) \times A_i$ is the Area for location $s_i$.
+
+
 ```{r get-cog}
-#| output: false
-#| cache: true
-
-tictoc::tic("get_cog, bias_correct = TRUE")
-cog <- get_cog(predictions, format = "wide", bias_correct = TRUE)
-tictoc::toc()
-# get_cog, bias_correct = TRUE: 74.494 sec elapsed
-tictoc::tic("get_cog, bias_correct = FALSE")
-cog_no_correct <- get_cog(predictions, format = "wide", bias_correct = FALSE)
-tictoc::toc()
-# get_cog, bias_correct = FALSE: 6.079 sec elapsed
-cog
-
-ggplot(cog, aes(est_x, est_y, colour = year)) +
-  geom_point() +
-  geom_linerange(aes(xmin = lwr_x, xmax = upr_x)) +
-  geom_linerange(aes(ymin = lwr_y, ymax = upr_y))
-
-ew <- ggplot(cog, aes(year, est_x)) +
-  geom_point() +
-  geom_linerange(aes(ymin = lwr_x, ymax = upr_x))
-
-ns <- ggplot(cog, aes(year, est_y)) +
-  geom_point() +
-  geom_linerange(aes(ymin = lwr_y, ymax = upr_y))
-
-# ns | ew
-
-fit_x <- lm(est_x ~ year, data = cog, weights = 1 / se_x^2) # inverse variance weighting for now @Question - even worth it?
-fit_y <- lm(est_y ~ year, data = cog, weights = 1 / se_y^2)
-
-cog_summary <- bind_rows(
-  broom::tidy(fit_x) |> filter(term == "year") |> mutate(name = "Centre Shift (E/W)", indicator = 'cog-ew'),
-  broom::tidy(fit_y) |> filter(term == "year") |> mutate(name = "Centre Shift (N/S)", indicator = 'cog-ns')
-) |>
-  transmute(
-    indicator,
-    name,
-    estimate,
-    se = std.error,
-    units = "km / year",
-    p_value = p.value,
+cog_by_sim <- sims_with_total |>
+  group_by(time_period, region, year, sim) |>
+  summarise(
+    x = weighted.mean(X, w = exp(log_abundance)), # same as: x = sum(exp(log_abundance) * X) / sum(exp(log_abundance)),
+    y = weighted.mean(Y, w = exp(log_abundance)),
+    .groups = "drop"
   )
 
-cog_summary
+cog <- cog_by_sim |>
+  group_by(time_period, region, year) |>
+  summarise(
+    across(c(x, y), list(
+      est = ~ stats::median(.x),
+      lwr = ~ stats::quantile(.x, 0.025),
+      upr = ~ stats::quantile(.x, 0.975),
+      se  = ~ stats::sd(.x)
+    ), .names = "{.fn}_{.col}"),
+    .groups = "drop"
+  )
+
+# @CHECK - example by sim
+cog_lm_by_sim_summary <- cog_by_sim |>
+  mutate(centred_year = year - last_historical_year) |>
+  tidyr::pivot_longer(c(x, y), names_to = "coord", values_to = "cog") |>
+  group_by(time_period, region, coord, sim) |>
+  summarise(slope = coef(lm(cog ~ centred_year))[["centred_year"]], .groups = "drop") |>
+  group_by(time_period, region, coord) |>
+  summarise(
+    estimate = stats::median(slope),
+    se       = stats::sd(slope),
+    lwr      = stats::quantile(slope, 0.025),
+    upr      = stats::quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)), #@Question - worth calculating?
+    .groups  = "drop"
+  ) |>
+  transmute(
+    indicator = if_else(coord == "x", "cog-ew", "cog-ns"),
+    name      = if_else(coord == "x", "Centre Shift (E/W)", "Centre Shift (N/S)"),
+    time_period,
+    region,
+    estimate,
+    lwr,
+    upr,
+    se,
+    prob_direction,
+    units     = "km / year"
+  )
+
+cog_summary <- cog_lm_by_sim_summary
 ```
+
+
+```{r cog-builtin-vs-sims}
+# Compare the get_cog and sims methods
+pred <- predict(fit, newdata = historical_grid, type = "link", return_tmb_object = TRUE)
+cog_builtin <- get_cog(pred, format = "wide", bias_correct = TRUE, area = pred$data$area)
+# meep()
+
+test <- cog |> mutate(d = "sims") |> filter(region == "all", time_period == "historical")
+```
+
+```{r cog-builtin-vs-sims-plot}
+#| fig-width: 9
+#| fig-height: 11
+ggplot(data = cog_builtin) +
+  aes(est_x, est_y) +
+  geom_point(colour = "black", size = 1) +
+  geom_linerange(aes(xmin = lwr_x, xmax = upr_x), linewidth = 0.1, colour = "black") +
+  geom_linerange(aes(ymin = lwr_y, ymax = upr_y), linewidth = 0.1, colour = "black") +
+  geom_point(data = test, size = 0.5) +
+  geom_linerange(data = test,
+    aes(xmin = lwr_x, xmax = upr_x), linewidth = 0.1, colour = "red") +
+  geom_linerange(data = test, aes(ymin = lwr_y, ymax = upr_y), linewidth = 0.1, colour = "red") +
+  facet_wrap(~ year)
+```
+
+```{r cog-single-year-map}
+#| eval: false
+test_year <- 2004:2022
+test_year <- 2011 # @Question: This year is visibly different between the two methods - not sure if this needs further investigation
+test1 <- cog |>
+  filter(region == "all", time_period == "historical") |>
+  filter(year %in% test_year) |>
+  XY_to_sf(coords = c("est_x", "est_y"))
+test2 <- cog_builtin |>
+  filter(year %in% test_year) |>
+  XY_to_sf(coords = c("est_x", "est_y"))
+ggplot() +
+  geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
+  geom_sf(data = pred_cell_sf |> filter(year %in% test_year), aes(fill = density_km2), alpha = 0.4, colour = NA) +
+  scale_fill_viridis_c(trans = "log10") +
+  geom_sf(data = test1, colour = "black", shape = 21) +
+  geom_sf(data = test2, colour = "red") +
+  scale_colour_viridis_c(option = "magma", end = 0.7) +
+  labs(colour = "Year", title = "Centre of gravity trajectory, Pacific Spiny Dogfish (WCVI)") +
+  gfplot::coord_sf_auto(pred_cell_sf) +
+  facet_wrap(~ year)
+
+```
+
 ```{r}
 #| fig-width: 7
 #| fig-height: 8
-
-cog_sf <- XY_to_sf(cog, coords = c("est_x", "est_y"), crs_to = st_crs(pred_sf)) |>
-  arrange(year)
-
-coords <- sf::st_coordinates(cog_sf)
-n <- nrow(coords)
-
-cog_segments_sf <- sf::st_sf(
-  year = cog_sf$year[-n],
-  year_end = cog_sf$year[-1],
-  geometry = sf::st_sfc(
-    purrr::map(seq_len(n - 1), \(i) sf::st_linestring(coords[i:(i + 1), , drop = FALSE])),
-    crs = sf::st_crs(cog_sf)
+make_cog_segments <- function(points_sf) {
+  points_sf <- dplyr::arrange(points_sf, year)
+  coords <- sf::st_coordinates(points_sf)
+  n <- nrow(coords)
+  if (n < 2) return(NULL)  # a single-year group has no segment to draw
+  sf::st_sf(
+    region      = points_sf$region[-n],
+    time_period = points_sf$time_period[-n],
+    year        = points_sf$year[-n],
+    year_end    = points_sf$year[-1],
+    geometry = sf::st_sfc(
+      purrr::map(seq_len(n - 1), \(i) sf::st_linestring(coords[i:(i + 1), , drop = FALSE])),
+      crs = sf::st_crs(points_sf)
+    )
   )
-)
+}
+
+cog_sf <- cog |>
+  XY_to_sf(coords = c("est_x", "est_y"), crs_to = st_crs(pred_cell_sf))
+
+cog_segments_sf <- cog_sf |>
+  dplyr::group_split(region, time_period) |>
+  purrr::map(make_cog_segments) |>
+  purrr::compact() |>
+  purrr::reduce(rbind)
+
+prediction_background <- pred_cell_sf |>
+  select(-region) |>
+  filter(year == last_historical_year | year == 2060)
 
 ggplot() +
   geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
-  geom_sf(data = pred_sf |> filter(year == max(pred_sf$year)), aes(fill = est_combined), alpha = 0.4, colour = NA) +
+  geom_sf(data = prediction_background, aes(fill = density_km2), alpha = 0.4, colour = NA) +
   scale_fill_viridis_c(trans = "log10") +
-  # geom_sf(data = cog_segments_sf, aes(colour = year), linewidth = 1) +
   geom_sf(data = cog_segments_sf, aes(colour = year), linewidth = 0.8,
         arrow = grid::arrow(length = unit(0.18, "cm"), type = "closed")) +
   geom_sf(data = cog_sf |> slice_max(year), aes(colour = year), size = 3) +
   scale_colour_viridis_c(option = "magma", end = 0.7) +
+  geom_sf(data = region_borders) +
   labs(colour = "Year", title = "Centre of gravity trajectory, Pacific Spiny Dogfish (WCVI)") +
-  gfplot::coord_sf_auto(pred_sf)
+  gfplot::coord_sf_auto(pred_cell_sf) +
+  facet_grid(region ~ time_period)
 
-# ggplot() +
-#   geom_sf(data = pred_sf, aes(fill = est_combined, colour = est_combined))+
-#   viridis::scale_fill_viridis(trans = "log10") +
-#   viridis::scale_colour_viridis(trans = "log10") +
-#   geom_sf(data = cog_segments_sf, colour = "black", alpha = 0.8) +
-#   geom_sf(data = cog_current, colour = "black") +
-#   scale_x_continuous(breaks = scales::pretty_breaks(n = 2)) +
-#   scale_y_continuous(breaks = scales::pretty_breaks(n = 2)) +
-#   facet_wrap(~ year, ncol = 4) +
-#   theme(legend.position = "inside",
-#         legend.position.inside = c(0.85, 0.1))
+# These are plotted right now but we could print them
+ew <- ggplot(cog, aes(year, est_x)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr_x, ymax = upr_x)) +
+  facet_wrap(~ region)
 
+ns <- ggplot(cog, aes(year, est_y)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr_y, ymax = upr_y)) +
+  facet_wrap(~ region)
 ```
 
 #### Area occupied
@@ -261,192 +745,193 @@ Three ways to display it on the shiny app plot:
 -[x] Area Efficiency
 
 ```{r}
-#| output: false
-avg_density_eao <- get_eao(predictions, bias_correct = TRUE, area = predictions$data$area) # uses calculation from Thorson et al. 2016 (Density-dependent changes in effective area occupied for sea-bottom-associated marine fishes)
+ranked_accumulation_by_sims <- sims_with_total |>
+  select(time_period, sim, cell, region, area, year, log_density, log_abundance) |> # make more manageable for now (maybe permament select)
+  group_by(time_period, region, year, sim) |>
+  # step 1 - rank by density within groups
+  arrange(desc(log_density), .by_group = TRUE) |>
+  # step 2 - cumulative abundance
+  mutate(
+    total_abundance = sum(exp(log_abundance)),
+    total_area = sum(area),
+    cumulative_abundance = cumsum(exp(log_abundance)),
+    percent_abundance = cumulative_abundance / total_abundance * 100,
+    cumulative_area = cumsum(area),
+    id = row_number()
+  ) # for plotting accumulation curves
 
-avg_density_eao
+# Accumulation curves -----
+# ranked_accumulation_by_sims |>
+#   filter(sim %in% 1:10) |>
+#   filter(year %in% c(2004, last_historical_year, 2060)) |>
+# ggplot(aes(x = id, y = cumulative_abundance)) +
+#   geom_point(aes(colour = year)) +
+#   facet_wrap(~ region, scales = "free_x")
 
-ggplot(data = avg_density_eao) +
-  aes(x = year, y = est, ymin = lwr, ymax = upr) +
-  geom_line() +
-  geom_ribbon(alpha = 0.3) +
-  ggtitle("Area required to contain population given average population density (sdmTMB built-in)")
+# ranked_accumulation_by_sims |>
+#   filter(sim %in% 1:10) |>
+#   filter(year %in% c(2004, last_historical_year, 2060)) |>
+# ggplot(aes(x = id, y = cumulative_area)) +
+#   geom_point(aes(colour = year)) +
+#   facet_wrap(~ region, scales = "free_x")
 
-```
-```{r eao-sims}
-#| cache: true
 
-# @TODO add region column to upstream data (in dogfish example will be survey_abbrev for now, or split polygon names)
-# DSAF area occupied = "what area holds X%  of the population"
-# X = 50, 75, 90, 95 quantiles of population density
-
-# @QUESTION: should combined estimates be included in the `prediction` object?
-# @TODO: make sure all units are correct in data prep stage
-
-# modified from: https://github.com/kifre1/Hali_Shift_withNF/blob/665ebe5246f40c65ef8982eb75f0a22bf62097eb/Data/Data_SHinyApp_Proof_of_Concept/Prep_timeseries_and_scaled_slope_data_POC.R#L70
-# - without uncertainty
-
-# @TODO: delete? if we use nsim method below?
-# cumulative_density_df <-
-#   predictions$data |>
-#   mutate(
-#     abundance = exp(est1 + est2), # @Note - WARNING - this only works if the links are the same (i.e., type = poisson-link)
-#     density = abundance / area
-#   ) |>
-#   # group_by(region, year) # @TODO add region
-#   group_by(year) |>
-#   # arrange(region, year, desc(density)) |> # @TODO add region
-#   arrange(year, desc(density)) |>
-#   mutate(
-#     total_abundance = sum(abundance),
-#     total_area = sum(area),
-#     cumulative_abundance = cumsum(abundance),
-#     percent_abundance = cumulative_abundance / total_abundance * 100,
-#     cumulative_area = cumsum(area)
-# ) |>
-#   mutate(id = row_number()) # for plotting accumulation curves
-#
-# ggplot(data = cumulative_density_df, aes(x = id, y = cumulative_abundance)) +
-#   geom_point(aes(colour = year))
-#
-# ggplot(data = cumulative_density_df, aes(x = id, y = cumulative_area)) +
-#   geom_point(aes(colour = year))
-#
-# thresholds <- c(50, 75, 90, 95)
-#
-# quantile_eao <- purrr::map_dfr(thresholds, \(threshold) {
-#   cumulative_density_df |>
-#     filter(percent_abundance >= threshold) |>
-#     slice(1) |> # take first value after crossing the threshold
-#     mutate(
-#       threshold = threshold,
-#       area_threshold = cumulative_area,
-#       percent_area_used = area_threshold / total_area * 100
-#     )
-#   }
-# )
-#
-# ggplot(data = quantile_eao) +
-#   aes(x = year, y = area_threshold, colour = threshold, groups = factor(threshold)) +
-#   geom_line() +
-#   scale_colour_viridis_c(option = "plasma", end = 0.7, direction = -1) +
-#   labs(colour = "% of population") +
-#   ggtitle("Minimum area needed to contain X% of population")
-
-# Method to get uncertainty? ---------------------------------------------------
-# @Question: use predict with nsim > 0 to get with some uncertainty?
-# @Question: I am mxing up whether to use link or response values - double check
+# trying to use approx instead - this uses linear interpolation like is done for range edges rather than choosing a value before (as in Halibut paper) or after (as I was doing before) the threshold is crossed
 thresholds <- c(50, 75, 90, 95)
 
-# @TODO make sure that varying areas are not going to be problematic
-# @TODO if keeping; pull out and document
-get_area_thresholds <- function(df, thresholds) {
-  df <- df |>
-    # predict(..., offset = 0) returns density (biomass / 1 km^2);
-    # Rank by density, not abundance, so a cell's rank doesn't depend on its area
-    # - split cells carry unequal, non-4-km^2 areas
-    mutate(abundance = density * area) |>
-    group_by(year) |> # @TODO add region
-    arrange(year, desc(density)) |> # @TODO add region
-    mutate(
-      total_abundance = sum(abundance),
-      total_area = sum(area),
-      cumulative_abundance = cumsum(abundance),
-      percent_abundance = cumulative_abundance / total_abundance * 100,
-      cumulative_area = cumsum(area)
-    ) |>
-    ungroup()
+quantile_eao_by_sim <- ranked_accumulation_by_sims |>
+  reframe(
+    threshold = thresholds,
+    area_threshold = approx(x = percent_abundance, y = cumulative_area,
+                                xout = thresholds, rule = 2, ties = "ordered")$y,
+    percent_area_used = area_threshold / dplyr::first(total_area),
+    area_efficiency    = area_threshold / dplyr::first(total_abundance)
+  ) |>
+  dplyr::select(time_period, region, year, sim, threshold, area_threshold, percent_area_used, area_efficiency)
 
-  purrr::map_dfr(thresholds, \(threshold) {
-    df |>
-      group_by(year) |>
-      filter(percent_abundance >= threshold) |> # @Question: ok? get threshold area just before percent_abundance reaches quantile, or should we get area after crossing before hitting the population quantile?
-      slice(1) |>
-      ungroup() |>
-      mutate(threshold = threshold,
-             area_threshold = cumulative_area,
-             percent_area_used = area_threshold / total_area * 100,
-             area_efficiency = area_threshold / total_abundance)
-  }) |>
-    select(year, threshold, area_threshold, percent_area_used, area_efficiency)
-}
 
-sim_results <- purrr::map_dfr(seq_len(ncol(sims_combined_response)), \(i) {
-  pred_grid |>
-    mutate(density = sims_combined_response[, i]) |>
-    get_area_thresholds(thresholds) |>
-    mutate(sim = i)
-})
-
-quantile_eao_df <- sim_results |>
-  tidyr::pivot_longer(
-    cols = c("area_threshold", "percent_area_used", "area_efficiency"),
-    names_to = "metric",
-    values_to = "value"
-    ) |>
-  group_by(year, threshold, metric) |>
+quantile_eao <- quantile_eao_by_sim |>
+  group_by(time_period, region, year, threshold) |>
   summarise(
-    mean = mean(value),
-    median = median(value),
-    sd = sd(value),
-    lwr = quantile(value, 0.025),
-    upr = quantile(value, 0.975),
+    across(c(area_threshold, percent_area_used, area_efficiency), list(
+      est = ~ stats::median(.x),
+      lwr = ~ stats::quantile(.x, 0.025),
+      upr = ~ stats::quantile(.x, 0.975),
+      se  = ~ stats::sd(.x)
+    ), .names = "{.fn}_{.col}"),
     .groups = "drop"
   )
-```
-```{r plot-area-occupied}
-metric_labels <- c(
-  area_threshold = "Total area occupied",
-  percent_area_used = "Percent of area used",
-  area_efficiency = "Area efficiency"
+
+eao_metric_meta <- tibble::tribble(
+  ~metric,             ~name,                  ~units,
+  "area_threshold",    "Area occupied",        "km^2^ / year",
+  "percent_area_used", "Percent of area used", "logit / year",
+  "area_efficiency",    "Area efficiency",        "km^2^ / kg or count"
 )
 
-plot_area_metric <- function(df, metric_name, title, thresholds = NULL) {
-  df <- df |> filter(metric == metric_name)
-  if (!is.null(thresholds)) df <- df |> filter(threshold %in% thresholds)
-
-  df |>
-    ggplot() +
-  aes(x = year, y = median, ymin = lwr, ymax = upr,
-    colour = threshold, fill = threshold, groups = factor(threshold)) +
-  geom_line() +
-  geom_ribbon(alpha = 0.2, colour = NA) +
-  scale_colour_viridis_c(option = "plasma", end = 0.7, direction = -1) +
-  scale_fill_viridis_c(option = "plasma", end = 0.7, direction = -1) +
-    labs(colour = "% of population", fill = "% of population", y = NULL, title = title) +
-  scale_x_continuous(expand = FALSE) +
-  facet_wrap(~ threshold)
-}
-
-area_plots <- purrr::imap(metric_labels, \(title, metric_name) {
-  plot_area_metric(quantile_eao_df, metric_name, title, threshold = c(90)) # filter threshold here
-})
-
-patchwork::wrap_plots(area_plots, ncol = 1) +
-  patchwork::plot_layout(guides = "collect")
-
-eao <- quantile_eao_df
-
-eao_90_lm <- lm(median ~ centred_year,
-  # weights = 1 / sd^2, # drop if using multiple nsim strategy
-  data = eao |> filter(threshold == 90, metric == "area_threshold") |> mutate(centred_year = year - mean(year)))
-summary(eao_90_lm)
-# @FIXME: current trend method limitations:
-#  1) estimate uncertainty (coarsely can use variance weighted as currently done)
-#  2) doesn't account for AR1 correlation
-# @Question: could fit trend to each nsim and summarise trend estimates from these?
-eao_summary <- broom::tidy(eao_90_lm) |>
-  filter(term == "centred_year") |>
+eao_lm_by_sim_summary <- quantile_eao_by_sim |>
+  # transform responses before lm fitting
+  mutate(
+    centred_year      = year - last_historical_year,
+    area_threshold    = area_threshold, # (units = km2)
+    percent_area_used = qlogis(percent_area_used / 100), # (units = dimensionless)
+    area_efficiency   = area_efficiency # (units = km2 / biomass unit -- kg in dogfish example)
+  ) |>
+  tidyr::pivot_longer(c(area_threshold, percent_area_used, area_efficiency),
+                      names_to = "metric", values_to = "value") |>
+  group_by(time_period, region, metric, threshold, sim) |>
+  summarise(slope = coef(lm(value ~ centred_year))[["centred_year"]], .groups = "drop") |>
+  group_by(time_period, region, metric, threshold) |>
+  summarise(
+    estimate = stats::median(slope),
+    se       = stats::sd(slope),
+    lwr      = stats::quantile(slope, 0.025),
+    upr      = stats::quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)),
+    .groups  = "drop"
+  ) |>
+  left_join(eao_metric_meta, by = "metric") |>
   transmute(
-    indicator = "eao-90",
-    name = "Area Occupied",
+    indicator = paste0("eao-", metric, "-", threshold),
+    name      = paste0(name, " (", threshold, "%)"),
+    time_period,
+    region,
     estimate,
-    se = std.error,
-    units = "km^2^ / year", # Not sure if this superscript is going to trip us up...
-    p_value = p.value
+    lwr,
+    upr,
+    se,
+    prob_direction,
+    units
   )
 
+eao_summary <- eao_lm_by_sim_summary
+
+# @Note to self - as a species becomes less patchy (less aggregated), area efficiency should increase because it takes more area to hold X% of the population; dividing the area threshold by abundance standardises this effect from total abundance (i.e., without it, as total abundance increases it obviously takes more area to hold the same amount of individuals)
 ```
+
+```{r compare-approx-vs-slice1}
+#| echo: false
+#| eval: false
+# step 3 - calculate values at abundance thresholds
+# thresholds <- c(50, 75, 90, 95)
+# quantile_eao_by_sim <- purrr::map(thresholds, \(t) {
+#   #@NOTE - right now this depends on maintaining the grouping of ranked_accumulation_by_sims, maybe we should code this in here/add a check here.
+#   ranked_accumulation_by_sims |>
+#     filter(percent_abundance >= t) |>
+#     slice(1) |> # first cell that crosses, per group; should we be interpolating like is done for range edge? use approx?
+#     mutate(
+#       threshold         = t,
+#       area_threshold    = cumulative_area,
+#       percent_area_used = area_threshold / total_area,
+#       area_efficiency   = area_threshold / total_abundance
+#     )
+# }) |>
+#   purrr::list_rbind() |>
+#   ungroup() |>
+#   select(time_period, region, year, sim, threshold,
+#          area_threshold, percent_area_used, area_efficiency)
+```
+
+
+```{r plot-area-occupied}
+plot_area_metric <- function(df, colour_var, facet_var = NULL,
+                             title = NULL,
+                             boundary_year = last_historical_year) {
+  p <- ggplot(df) +
+    aes(x = year, y = est, ymin = lwr, ymax = upr,
+        colour = {{ colour_var }}, fill = {{ colour_var }},
+        group = {{ colour_var }}) +
+    geom_vline(xintercept = boundary_year, linetype = 2, colour = "grey60") +
+    geom_line() +
+    geom_ribbon(alpha = 0.2, colour = NA) +
+    scale_x_continuous(expand = expansion()) +
+    labs(y = NULL, title = title)
+
+  if (!rlang::quo_is_null(rlang::enquo(facet_var))) { # enquo captures without evaluating; then can check if quo is null; no need to evaluate/check whether column exists
+    p <- p + facet_wrap(vars({{ facet_var }}), ncol = 1, scales = "free_y")
+  }
+  p
+}
+
+quantile_eao_long <- quantile_eao |>
+  tidyr::pivot_longer(
+    cols = -c(time_period, region, year, threshold),
+    names_to = c(".value", "metric"),
+    names_pattern = "(est|lwr|upr|se)_(.*)"
+  )
+
+# One plot per metric (different y-units). Filter to the metric HERE,
+# not inside the function. pmap over the meta table so title = the
+# human-readable name and units are available if you want them.
+area_plots <- purrr::pmap(eao_metric_meta, \(metric, name, units) {
+  quantile_eao_long |>
+    filter(region != "all") |> # only look at subregions
+    filter(.data$metric == .env$metric, threshold == 90) |>
+    plot_area_metric(
+      colour_var = region,
+      facet_var = NULL,
+      title = name
+    ) +
+    scale_colour_viridis_d(end = 0.7) +      # region is discrete
+    scale_fill_viridis_d(end = 0.7)
+})
+```
+
+```{r plot-area-occupied-composite}
+#| fig-width: 7
+#| fig-height: 10
+patchwork::wrap_plots(area_plots, ncol = 1) +
+  patchwork::plot_layout(guides = "collect")
+```
+
+```{r plot-area-occupied-individual}
+#| eval: false
+#| echo: false
+area_plots[[1]]
+area_plots[[2]]
+area_plots[[3]]
+```
+
 
 #### Range edge
 
@@ -460,58 +945,157 @@ eao_summary <- broom::tidy(eao_90_lm) |>
 
 * What is this really meaning when we have only a small part of the distribution??
 
+* Not calculated by region
+
+
+$$\frac{\sum_{i \le k} d_i A}{\sum_i d_i A} = \frac{A\sum_{i \le k} d_i}{A\sum_i d_i} = \frac{\sum_{i \le k} d_i}{\sum_i d_i}$$
+But we may have unequal area grid cells - e.g., the HBLL? Though realistically this might be the only case where this actually happens.
+
+So we need:
+
+$$\frac{\sum_{i \le k} d_i A}{\sum_i d_i A}$$
 
 ```{r range-edges}
-head(sims_link)
+# step 1 - order spatial locations along specified axis (Y = N/S (N > S); X = E/W (W > E))
+# step 2 - calculate cumulative proportion of total density (for unequal area - abundance) along that axis
+# step 3 - Find positions where cumulative proportion equals target quantities (5%, 95%)
+# step 4 - Summarise from simulations for uncertainty
 
-# @Question: Are we doing E/W edge? This looks like it is in the shiny app indicator wheel.
+range_edge_quantiles <- c(trailing = 0.05, leading = 0.95)
 
-# @Question: should this be density-weighted? For this example, and our Pacific synoptic surveys this isn't a problem, because all of the grid cells are the same size, but I don't know if this will hold true, or if for example we were to consider the Pacific HBLL, those grid cells overlap with land and so have different overwater areas.
-edges <- get_range_edge(sims_link, axis = pred_grid$Y, quantiles = c(0.05, 0.95))
-
-ggplot(edges, aes(year, y = est, ymin = lwr, ymax = upr, group = quantile)) +
-  geom_ribbon(fill = "grey90") +
-  geom_line()
-
-# @Question: do we need to scale year? everything is a rate in years so probably not??
-# @Question: should years be centred to final observed year if forecasting?
-# @Question: should year be centred upstream - is there any chance of this borking later?
-# @Question: should we be filtering/calculating without dplyr?
-# @Question: should we assume the edges to act independently?
-# @FIXME: current trend method limitations:
-#  1) estimate uncertainty (coarsely can use variance weighted as currently done)
-#  2) doesn't account for AR1 correlation
-# @Question: could fit trend to each nsim and summarise trend estimates from these?
-
-north_edge_lm <- lm(est ~ centred_year, data = edges |> filter(quantile == 0.95) |> mutate(centred_year = year - mean(year)))
-summary(north_edge_lm)
-
-south_edge_lm <- lm(est ~ centred_year, data = edges |> filter(quantile == 0.05) |> mutate(centred_year = year - mean(year)))
-summary(south_edge_lm)
-
-north_edge_summary <- broom::tidy(north_edge_lm) |>
-  filter(term == "centred_year") |>
-  transmute(
-    indicator = "edge-north",
-    name = "Edge Shift (N)",
-    estimate,
-    se = std.error,
-    units = "km / year",
-    p_value = p.value
+range_edge_NS_by_sim <- sims_with_total |>
+  filter(region == "all") |> # only use coastwide - maybe needs better region name than "all"
+  group_by(time_period, region, year, sim) |> # keeping region allows the value to be propagated through even though we only use "all"
+  arrange(Y, .by_group = TRUE) |>
+  mutate(cumul_prop = cumsum(exp(log_abundance)) / sum(exp(log_abundance))) |> #L.201 - 203 in get-range-edge.R sdmTMB
+  reframe(
+    edge   = names(range_edge_quantiles),
+    Y_edge = approx(cumul_prop, Y, xout = range_edge_quantiles, rule = 2, ties = "ordered")$y
   )
 
-south_edge_summary <- broom::tidy(south_edge_lm) |>
-  filter(term == "centred_year") |>
-  transmute(
-    indicator = "edge-south",
-    name = "Edge Shift (S)",
-    estimate,
-    se = std.error,
-    units = "km / year",
-    p_value = p.value
+range_edge_NS <- range_edge_NS_by_sim |>
+  group_by(time_period, region, year, edge) |>
+  summarise(
+    est = median(Y_edge),
+    lwr = quantile(Y_edge, 0.025),
+    upr = quantile(Y_edge, 0.975),
+    se  = sd(Y_edge),
+    .groups = "drop"
   )
 
-edge_summary <- bind_rows(north_edge_summary, south_edge_summary)
+range_NS_lm_sim_summary <- range_edge_NS_by_sim |>
+  group_by(time_period, region, edge, sim) |>
+  mutate(centred_year = year - last_historical_year) |>
+  summarise(slope = coef(lm(Y_edge ~ centred_year))[["centred_year"]], .groups = "drop") |>
+  group_by(time_period, region, edge) |>
+  summarise(
+    estimate = stats::median(slope),
+    se       = stats::sd(slope),
+    lwr      = stats::quantile(slope, 0.025),
+    upr      = stats::quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)),
+    .groups  = "drop"
+  ) |>
+  transmute(
+indicator = case_when(edge == "leading" ~ "edge-north", edge == "trailing" ~ "edge-south"),
+    name = case_when(edge == "leading" ~ "Edge Shift (N)", edge == "trailing" ~ "Edge Shift (S)"),
+    time_period,
+    region,
+    estimate,
+    lwr,
+    upr,
+    se,
+    prob_direction,
+    units = "km / year"
+  )
+
+# @TODO - clean up duplication of code
+# @Question - do we want/need the EW range? -- see: @misc{PDFRangeEdges2026,title = {({{PDF}}) {{Range}} Edges of {{North American}} Marine Species Are Tracking Temperature over Decades} for details on distance from coast axis; something is weird with how this below is performing.
+range_edge_EW_by_sim <- sims_with_total |>
+  filter(region == "all") |> # only use coastwide - maybe needs better region name than "all"
+  group_by(time_period, region, year, sim) |> # keeping region allows the value to be propagated through even though we only use "all"
+  arrange(Y, .by_group = TRUE) |>
+  mutate(cumul_prop = cumsum(exp(log_abundance)) / sum(exp(log_abundance))) |> #L.201 - 203 in get-range-edge.R sdmTMB
+  reframe(
+    edge   = names(range_edge_quantiles),
+    Y_edge = approx(cumul_prop, Y, xout = range_edge_quantiles, rule = 2, ties = "ordered")$y
+  )
+
+range_edge_EW <- range_edge_EW_by_sim |>
+  group_by(time_period, region, year, edge) |>
+  summarise(
+    est = median(Y_edge),
+    lwr = quantile(Y_edge, 0.025),
+    upr = quantile(Y_edge, 0.975),
+    se  = sd(Y_edge),
+    .groups = "drop"
+  )
+
+range_EW_lm_sim_summary <- range_edge_EW_by_sim |>
+  group_by(time_period, region, edge, sim) |>
+  mutate(centred_year = year - last_historical_year) |>
+  summarise(slope = coef(lm(Y_edge ~ centred_year))[["centred_year"]], .groups = "drop") |>
+  group_by(time_period, region, edge) |>
+  summarise(
+    estimate = stats::median(slope),
+    se       = stats::sd(slope),
+    lwr      = stats::quantile(slope, 0.025),
+    upr      = stats::quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)),
+    .groups  = "drop"
+  ) |>
+  transmute(
+indicator = case_when(edge == "leading" ~ "edge-west", edge == "trailing" ~ "edge-east"),
+    name = case_when(edge == "leading" ~ "Edge Shift (W)", edge == "trailing" ~ "Edge Shift (E)"), # do these names change depending on coast? definitely need to go look at Fredston et al.
+    time_period,
+    region,
+    estimate,
+    lwr,
+    upr,
+    se,
+    prob_direction,
+    units = "km / year"
+  )
+
+edge_summary <- bind_rows(range_NS_lm_sim_summary, range_EW_lm_sim_summary)
+
+```
+
+```{r approx-scratch}
+#| eval: false
+#| echo: false
+# @Note: no zero-abundance failsafe here, unlike sdmTMB's `if (total_dens > 0)` guard: https://github.com/pbs-assess/sdmTMB/blob/891d8e7f914759338ef91d078032ee85d2ed778b/R/get-range-edge.R#L201-L202
+# For `approx()`: `rule` controls out-of-range xout (a quantile outside [min(cumul_prop), max(cumul_prop)]):
+#   rule = 1 -> NA           (refuse to extrapolate; edge is off-grid)
+#   rule = 2 -> nearest end  (clamp to the boundary cell's Y) --> what sdmTMB does
+
+# # @Notes - me understanding how approx maps to the get-range-edge.R code L. 211 - 231
+# # approx example:
+# cumul_prop     <- c(0.05, 0.20, 0.45, 0.70, 0.90, 1.00)   # x: the CDF
+# axis_ordered <- c(5300, 5302, 5304, 5306, 5308, 5310)   # y: northing
+# q <- 0.99                                                # target proportion
+# cross_idx <- which(cumul_prop >= q)[1]
+# idx1 <- cross_idx - 1
+# idx2 <- cross_idx
+
+# prop1 <- cumul_prop[idx1]
+# prop2 <- cumul_prop[idx2]
+# axis1 <- axis_ordered[idx1]
+# axis2 <- axis_ordered[idx2]
+
+# # Interpolate
+# weight <- (q - prop1) / (prop2 - prop1) # oh, this says q is a third of the way between prop1 and prop2
+# edge_pos <- axis1 + weight * (axis2 - axis1) # add 1/3 of the difference between the cross id axis values
+# edge_pos
+# approx(cumul_prop, axis_ordered, xout = q, rule = 2)$y
+
+# Understanding the approx rules
+# q = 0.02  | rule=1:     NA | rule=2:   5300 | sdmTMB:   5300   <- BELOW range: southernmost cell alone already holds >2% -> trailing edge is off-grid
+# q = 0.05  | rule=1:   5300 | rule=2:   5300 | sdmTMB:   5300   <- exactly on the first point
+# q = 0.50  | rule=1: 5304.4 | rule=2: 5304.4 | sdmTMB: 5304.4   <- interior (interpolation); rule irrelevant
+# q = 0.975 | rule=1: 5309.5 | rule=2: 5309.5 | sdmTMB: 5309.5   <- interior; upper quantiles are ALWAYS interior since cum_prop reaches 1.0
+# q = 1.00  | rule=1:   5310 | rule=2:   5310 | sdmTMB:   5310   <- exactly on the last point (== max), so NOT out of range -> not NA
+# q > 1.00  | rule=1:     NA | rule=2:   5310 | sdmTMB:     NA   <- only here does rule=1 give NA; but this doens't apply because we are looking at quantiles (so q <=1 )
 
 ```
 
@@ -521,59 +1105,60 @@ edge_summary <- bind_rows(north_edge_summary, south_edge_summary)
 * Density-weighted average depth (50th percentile). Indicates changes in depth niche over time
 
 ```{r mean-depth}
-# @Question - should we be using nsim method to get quantiles?
+# @Question - mean depth, not mean log_depth correct?
+d_by_sim <- sims_with_total |>
+  group_by(time_period, region, year, sim) |>
+  summarise(
+    mean_depth = weighted.mean(depth_m, w = exp(log_abundance)),
+    .groups = "drop"
+  )
 
-mean_log_depth <- get_weighted_average(predictions, area = predictions$data$area, vector = predictions$data$log_depth)
-mean_depth <- get_weighted_average(predictions, area = predictions$data$area, vector = exp(predictions$data$log_depth))
+mean_depth_sims <- d_by_sim |>
+  group_by(time_period, region, year) |>
+  summarise(
+    est = stats::median(mean_depth),
+    lwr = stats::quantile(mean_depth, probs = 0.025),
+    upr = stats::quantile(mean_depth, probs = 0.975),
+    se  = stats::sd(mean_depth),
+    .groups = "drop"
+  )
 
-ggplot(data = mean_depth) +
-  aes(x = year, y = est, ymin = lwr, ymax = upr) +
+ggplot(data = mean_depth_sims) +
+  aes(x = year, y = est, ymin = lwr, ymax = upr, groups = region) +
   geom_line() +
   geom_ribbon(alpha = 0.3) +
   scale_y_reverse() +
-  labs(x = "Year", y = "Mean depth")
+  labs(x = "Year", y = "Mean depth") +
+  facet_wrap(~ region)
 
-depth_lm <- lm(est ~ centred_year, data = mean_depth |> mutate(centred_year = year - mean(year)))
-summary(depth_lm)
-# @FIXME: same trend fit issue: ignores AR1 cross-year correlation and uncertainty of estimates
 
-```
-
-```{r}
-#| output: false
-
-# @Question - do we want median raw depth? or mean + se for log-transformed depth from get_weighted_average?
-# @Question - double checking that this should be done for depth (not log transformed)
-ggplot() +
-  geom_pointrange(data = mean_log_depth, aes(x = year, y = est, ymin = lwr, ymax = upr), colour = "red") +
-  geom_pointrange(data = mean_depth, aes(x = year + 0.2, y = log(est), ymin = log(lwr), ymax = log(upr)))
-
-# some diagnostics on the depth trend
-plot(depth_lm)
-
-depth_diag <- broom::augment(depth_lm)
-
-ggplot(depth_diag, aes(.fitted, .std.resid)) +
-  geom_point() +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(x = "Fitted", y = "Standardized residual")
-
-ggplot(depth_diag, aes(sample = .std.resid)) +
-  stat_qq() +
-  stat_qq_line()
-
-depth_summary <- broom::tidy(depth_lm) |>
-  filter(term == "centred_year") |>
+depth_lm_by_sim_summary <- d_by_sim |>
+  group_by(time_period, region, sim) |>
+  mutate(centred_year = year - last_historical_year) |>
+  summarise(slope = coef(lm(mean_depth ~ centred_year))[["centred_year"]], .groups = "drop") |>
+  group_by(time_period, region) |>
+  summarise(
+    estimate = stats::median(slope),
+    se       = stats::sd(slope),
+    lwr      = stats::quantile(slope, 0.025),
+    upr      = stats::quantile(slope, 0.975),
+    prob_direction  = 2 * min(mean(slope > 0), mean(slope < 0)),
+    .groups  = "drop"
+  ) |>
   transmute(
     indicator = "depth",
     name = "Depth Trend",
+    time_period,
+    region,
     estimate,
-    se = std.error,
-    units = "m / year",
-    p_value = p.value
+    lwr,
+    upr,
+    se,
+    prob_direction,
+    units = "m / year"
   )
 
-depth_summary
+depth_summary <- depth_lm_by_sim_summary
 
 ```
 
@@ -584,20 +1169,27 @@ Note - these are results from simple linear models - the response has not been s
 ```{r, results=TRUE}
 
 # @Question: should abundance/biomass trend be reported as % change / year instead of the raw log-scale slope?
-bind_rows(eao_summary, abundance_summary, cog_summary, edge_summary, prop_abundance_summary, depth_summary) |>
-  mutate(
-    signif = dplyr::case_when(
-      p_value < 0.001 ~ "***",
-      p_value < 0.01  ~ "**",
-      p_value < 0.05  ~ "*",
-      .default = ""
-    ),
-    across(c(estimate, se), \(x) round(x, 2)),
-    p_value = scales::pvalue(p_value)
-  ) |>
+bind_rows(
+  abundance_summary,
+  prop_abundance_summary,
+  eao_summary |> filter(grepl("90", indicator)), # use 90% threshold for now
+  cog_summary,
+  edge_summary,
+  depth_summary) |>
+  select(indicator, name, time_period, region, estimate, se, units) |>
+  mutate(across(c(estimate, se), ~ signif(.x, 3))) |>
   knitr::kable(
-    col.names = c("Indicator", "Name", "Estimate", "SE", "Units", "p-value", "Sig."), # @TODO: will need to add region column
-    align = "llrrlrc"
-  )
+    col.names = c("Indicator", "Name", "Time period", "Region", "Estimate", "SE", "Units"), # option to add prob_value
+    align = "llllrrl",
+    booktabs = TRUE
+  ) |>
+  kableExtra::kable_styling(latex_options = c("repeat_header"), font_size = 8) |>
+  kableExtra::column_spec(1, width = "2.1cm") |>
+  kableExtra::column_spec(2, width = "4cm") |>
+  kableExtra::column_spec(3, width = "1.5cm") |>
+  kableExtra::column_spec(4, width = "1.3cm") |>
+  kableExtra::column_spec(5, width = "1.7cm") |>
+  kableExtra::column_spec(6, width = "1.7cm") |>
+  kableExtra::column_spec(7, width = "2.2cm")
 
 ```
