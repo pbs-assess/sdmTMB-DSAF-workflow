@@ -376,67 +376,7 @@ abund_lm_by_sim_summary <- abund_lm_by_sim |>
     prob_direction,
     units = "log(biomass) / year" # @TODO: generalise the units
   )
-abundance_summary <- abund_lm_by_sim_summary
 
-```
-
-
-```{r compare-with-get-index-sims}
-# |eval: false
-# |echo: false
-# Just a comparison of two methods to make sure I have coded things correctly
-test <- get_index_sims(log(historical_sim_preds), area = historical_grid$area)
-test
-
-# Yay!!! They match!
-ggplot() +
-  aes(x = year, y = est, ymin = lwr, ymax = upr) +
-  geom_line(data = filter(a_by_region, time_period == "historical", region == "all"), linewidth = 2, colour = "red") +
-  geom_ribbon(data = filter(a_by_region, time_period == "historical", region == "all"), alpha = 0.2, fill = "red") +
-  geom_line(data = test) +
-  geom_ribbon(data = test, alpha = 0.2, colour = "black") +
-  scale_y_continuous(labels = scales::label_number(scale = 1e-3)) +
-  labs(y = expression("Abundance index"~(x*10^3)))
-
-# hist_max <- max(a_total$upr[a_total$year <= last_historical_year])
-ggplot(data = filter(a_by_region, region == "all")) +
-  aes(x = year, y = est, ymin = lwr, ymax = upr) +
-  geom_ribbon(alpha = 0.3) +
-  geom_line() +
-  scale_y_continuous(labels = scales::label_number(scale = 1e-3)) +
-  coord_cartesian(expand = FALSE) +
-  labs(y = expression("Abundance index"~(x*10^3))) +
-  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey50")
-
-a_region_lm <- a_by_region |>
-  mutate(centred_year = year - last_historical_year) |>
-  group_by(region, time_period) |>
-  group_split() |>
-  purrr::map_dfr(\(x) {
-      fit_lm <- lm(log(est) ~ centred_year, data = x)
-      # print(summary(fit_lm))
-      broom::tidy(fit_lm) |>
-        mutate(
-          time_period = unique(x$time_period),
-          region = unique(x$region))
-    }
-  )
-
-abundance_summary_og <- a_region_lm |>
-  filter(term == "centred_year") |>
-  transmute(
-    indicator = "abundance",
-    name = "Abundance Trend",
-    region = region,
-    time_period = time_period,
-    estimate,
-    se = std.error,
-    units = "log(biomass) / year", # @TODO: generalise the units
-    p_value = p.value
-  )
-
-abundance_summary_og
-abund_lm_by_sim_summary
 ```
 
 #### Proportional abundance
