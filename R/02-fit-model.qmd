@@ -166,20 +166,15 @@ historical_years <- min(dog$year):max(dog$year)
 predictions <- predict(
   fit,
   newdata = prediction_grid |> filter(year %in% historical_years),
-  type = "link",
-  return_tmb_object = TRUE
+  type = "response"
 )
 
-pred_poly <- left_join(cell_polygons, predictions$data)
+pred_poly <- left_join(cell_polygons, predictions)
 
 # Some visual checks -----------------------------------------------------------
-
-
-pred_poly <- combine_est(pred_poly, fit) # @Question - do we need this? or should we just be plotting the output of nsim if we just want a visualisation of the predictions for a delta-model? I guess this is faster.
-
 # Also useful diagnostic to see if NA values make sense - wrt to where we are truly missing covariate data
 ggplot(pred_poly) +
-  geom_sf(aes(fill = est_combined), colour = NA) +
+  geom_sf(aes(fill = est), colour = NA) +
   scale_fill_viridis_c(trans = "log10") +
   facet_wrap(~year) +
   ggtitle("Predicted distribution of Pacific Spiny Dogfish (WCVI)")
@@ -203,15 +198,20 @@ plot_field(pred_poly, fit, "epsilon_st", "Spatiotemporal random field")
 
 ```{r}
 # Temporary load models so I don't have to run above model fits to look at diagnostics
-fit <- readRDS(file.path(fit_dir, "dogfish-tweedie.rds"))
+# fit <- readRDS(file.path(fit_dir, "dogfish-tweedie.rds"))
 # fit <- readRDS(file.path(fit_dir, "dogfish-ln-tv.rds"))
+fit <- readRDS(file.path(fit_dir, "dogfish-dgg.rds"))
 ```
 
 
 ```{r}
-out <- project(fit, newdata = prediction_grid, nsim = 10) # values in link space
+out <- project(fit, newdata = prediction_grid, nsim = 50) # values in link space
 
 glimpse(out)
+
+# @hack to deal with returning of each delta model estimate
+if (fit$family$delta) out$est <- fit$family[[1]]$linkinv(out$est1) * fit$family[[2]]$linkinv(out$est2)
+
 est_mean <- apply(out$est, 1, mean) # summarize however you'd like
 est_se <- apply(out$est, 1, sd)
 

@@ -8,26 +8,6 @@ meep <- function(user = "jilliandunic", ...) {
 
 
 #@TODO edit/review documentation
-# @Question: is this function even needed? should I just use nsim method to get combined estimate in response space?
-#' Combine delta-model estimates onto the response scale
-#'
-#' Applies each component's own link function and, for delta models,
-#' multiplies the two components together (as sdmTMB delta models
-#' combine probability and positive-catch components).
-#'
-#' @param pred A data frame of predictions containing `est` (single-family
-#'   models) or `est1`/`est2` (delta-family models), on the link scale.
-#' @param fit A fitted sdmTMB model object.
-#'
-#' @return `pred` with an added `est_combined` column on the response scale.
-combine_est <- function(pred, fit) {
-  if (isTRUE(fit$family$delta)) {
-    pred$est_combined <- fit$family[[1]]$linkinv(pred$est1) * fit$family[[2]]$linkinv(pred$est2)
-  } else {
-    pred$est_combined <- fit$family$linkinv(pred$est)
-  }
-  pred
-}
 
 #' Identify which random field columns are active in a fitted model
 #'
