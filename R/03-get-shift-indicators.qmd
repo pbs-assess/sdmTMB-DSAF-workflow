@@ -8,7 +8,7 @@ format:
         \usepackage{fvextra}
         \fvset{breaklines,breakanywhere}
 execute:
-  # echo: false     # hide code
+  echo: false     # hide code
   warning: false  # hide warnings
   message: false  # hide messages
 ---
@@ -28,13 +28,26 @@ source(here::here("R", "00-settings.R"))
 source(here::here("R", "functions.R"))
 ```
 
+```{r load-model-outputs}
+fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
+print(fit) # re-attaches the TMB pointer after a fresh-session reload; see reinitialize()
+prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
+cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
+
+# Multiple regions not required to work
+region_polys_path <- file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp")
+region_polys <- if (file.exists(region_polys_path)) {
+  sf::st_read(region_polys_path, quiet = TRUE)
+} else {
+  cli::cli_warn("Region polygon shapefile not found at {.file {region_polys_path}}; skipping region overlays.")
+  NULL
+}
+
+```
+
 Three objects feed `02-fit-model.qmd` and `03-get-shift-indicators.qmd`. All are
 built in `01-data-prep.qmd` and cached to disk so downstream scripts can
 `readRDS()`/`st_read()` them.
-
-```{r load-model-outputs}
-fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
-```
 
 **1. `fit` - sdmTMB model output**
 
@@ -49,7 +62,7 @@ that instead, projections are done here using `project()`. This could be adjuste
 **2. `prediction_grid` — plain data.frame, no geometry**
 
 ```{r}
-prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
+#| results: markup
 head(prediction_grid)
 ```
 
@@ -85,7 +98,7 @@ For example in the dogfish demo:
 
 **3. `cell_polygons` — sf object, one row per cell x region**
 ```{r}
-cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
+#| results: markup
 cell_polygons |> head()
 ```
 
@@ -109,11 +122,7 @@ cell_polygons |> head()
 **4. `region_polys` — sf object, one row per region**
 
 ```{r}
-region_polys <- sf::st_read(
-  file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp"),
-  quiet = TRUE
-)
-
+#| results: markup
 region_polys
 ```
 
@@ -133,6 +142,7 @@ Was used in `R/01-data-prep.R` to split the 'all' grid into regions.
 ```{r}
 # Get line segments for region borders to declutter plots downstream
 region_borders <- get_region_borders(region_polys)
+region_layer <- if (!is.null(region_polys)) geom_sf(data = region_polys, fill = NA, linewidth = 0.5)
 
 # Separate into historical and forecast grids based on data used in model object
 # (assumes projections not included in model)
@@ -498,7 +508,7 @@ ggplot() +
   gfplot::coord_sf_auto(pred_cell_sf) +
   facet_grid(region ~ time_period)
 
-# These are plotted right now but we could print them
+# These are not plotted right now but we could print them
 ew <- ggplot(cog, aes(year, est_x)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr_x, ymax = upr_x)) +
