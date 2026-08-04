@@ -6,7 +6,6 @@ meep <- function(user = "jilliandunic", ...) {
   }
 }
 
-
 #@TODO edit/review documentation
 
 #' Identify which random field columns are active in a fitted model
@@ -66,6 +65,102 @@ plot_field <- function(pred_poly, fit, prefix, title) {
     ggtitle(title)
 }
 
+# @TODO - document
+#' median/95% interval/sd summary across simulation draws
+#'
+#' One row per `by` group. With a single `cols` column, output columns are
+#' plain `est`/`lwr`/`upr`/`se`. With multiple `cols`, each gets its own
+#' suffixed set (`est_x`, `est_y`, ...) via `across()`.
+summarise_sim_ci <- function(df, cols, by) {
+  col_names <- tidyselect::eval_select(rlang::enquo(cols), df)
+  name_pattern <- if (length(col_names) == 1) "{.fn}" else "{.fn}_{.col}"
+
+  df |>
+    summarise(
+      across({{ cols }}, list(
+        est = ~ stats::median(.x),
+        lwr = ~ stats::quantile(.x, 0.025),
+        upr = ~ stats::quantile(.x, 0.975),
+        se  = ~ stats::sd(.x)
+      ), .names = name_pattern),
+      .by = {{ by }}
+    )
+}
+
+#' lm() coefficient summary across simulation draws
+#'
+#' Fits `value ~ centred_year` separately within each simulation draw and
+#' each combination of `by` columns, then summarises the resulting
+#' distribution of *each* coefficient (intercept and slope) across sims
+#' (median/se/95% interval and probability of direction). Both coefficients
+#' come from a single `lm()` fit per sim/group -- filter to the one you want
+#' (`term == "centred_year"` for the trend slope used by every shift
+#' indicator; `term == "(Intercept)"` for the fitted level at
+#' `last_historical_year`, e.g. to sanity-check that regional intercepts
+#' line up as expected) rather than calling this twice.
+#'
+#' @param df A data frame with one row per simulation draw (and whatever
+#'   `by` groups apply), containing `sim` and `centred_year`.
+#' @param value Column or expression to regress on `centred_year`, tidy-eval,
+#'   e.g. `log(x)` or `qlogis(prop)`.
+#' @param by <tidy-select> Grouping column(s) identifying one time series
+#'   per simulation draw, e.g. `c(time_period, region)`. Accepts a
+#'   character vector via `all_of()`, so a shared set of grouping columns
+#'   can be defined once (e.g. at the top of the script) and reused or
+#'   extended per indicator.
+#'
+#' @return A data frame with `term`, `by` columns, `estimate`, `se`, `lwr`,
+#'   `upr`, `prob_direction` -- one row per term (`"(Intercept)"` and
+#'   `"centred_year"`) per `by` group.
+summarise_sim_trend <- function(df, value, by) {
+  coefs <- df |>
+    mutate(.value = {{ value }}) |>
+    reframe(
+      {
+        co <- coef(lm(.value ~ centred_year))
+        tibble::tibble(term = names(co), coef_est = as.numeric(co))
+      },
+      .by = c(sim, {{ by }})
+    )
+
+  coefs |>
+    summarise(
+      estimate       = stats::median(coef_est),
+      se             = stats::sd(coef_est),
+      lwr            = stats::quantile(coef_est, 0.025),
+      upr            = stats::quantile(coef_est, 0.975),
+      prob_direction = 2 * min(mean(coef_est > 0), mean(coef_est < 0)),
+      .by = c(term, {{ by }})
+    )
+}
+
+
+#@TODO - clean up docs
+#' position where cumulative abundance crosses each target quantile.
+#'
+#' @param df A data frame with one row per cell x sim (and `by` groups),
+#'   containing `log_abundance` and the column referenced by `rank_var`.
+#' @param rank_var Tidy-eval column to rank/interpolate along, e.g. `Y`, `X`
+#' @param quantiles Named numeric vector of target cumulative-abundance
+#'   quantiles, e.g. `c(trailing = 0.05, leading = 0.95)`.
+#' @param by <tidy-select> Grouping column(s) identifying one ranking series
+#'   per sim, e.g. `c(time_period, region, year, sim)`.
+#'
+#' @return A data frame with `by` columns, `edge`, and `{rank_var}_edge`
+#'   (interpolated value of `rank_var` at each quantile).
+get_range_edge_sim <- function(df, rank_var, quantiles, by) {
+  edge_col <- paste0(rlang::as_label(rlang::enquo(rank_var)), "_edge")
+
+  df |>
+    mutate(.rank_var = {{ rank_var }}) |>
+    group_by(pick({{ by }})) |>
+    arrange(.rank_var, .by_group = TRUE) |>
+    mutate(cumul_prop = cumsum(exp(log_abundance)) / sum(exp(log_abundance))) |> #L.201 - 203 in get-range-edge.R sdmTMB
+    reframe(
+      edge = names(quantiles),
+      "{edge_col}" := approx(cumul_prop, .rank_var, xout = quantiles, rule = 2, ties = "ordered")$y
+    )
+}
 
 #@TODO: TEST ME with more data
 #' Shared internal borders between adjacent region polygons
@@ -84,6 +179,7 @@ plot_field <- function(pred_poly, fit, prefix, title) {
 #'   `n.overlaps` column (number of regions sharing each segment). Empty if
 #'   no regions share an edge.
 get_region_borders <- function(polys) {
+  if (is.null(polys)) return(NULL)
   b <- sf::st_intersection(sf::st_boundary(polys))  # pairwise self-intersections
   b <- b[b$n.overlaps > 1, ]                        # keep only shared edges
   b <- sf::st_collection_extract(b, "LINESTRING") # not sure if we should suppress these yet until we test more polygons
