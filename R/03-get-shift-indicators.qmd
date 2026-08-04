@@ -169,64 +169,38 @@ last_historical_year <- max(historical_grid$year) # use for centring so no ambig
 Generate simulated draws; right now separately done using `simulate()` for the
 historical data and `project()` for forecasts. No observation error included.
 
-```{r}
-historical_sim_preds <- simulate(
+```{r sim-draws}
+#| cache: true
+#| cache.extra: !expr tools::md5sum(c(file.path(fit_dir, "dogfish-dgg.rds"), file.path(model_input_dir, "prediction-grid.rds")))
+
+set.seed(2026)
+
+projections <- project(
   fit,
-  newdata = historical_grid, # reminder to myself --> can only do time elements included in fitting
-  type = "mle-mvn", # fixed effects are at their MLEs but random effects are taken from a single approximate sample
-  mle_mvn_samples = "multiple", # take an MVN draw from the random effects for each of the nsim.
-  nsim = 50, #@TODO - will update this to argument passed above so we only need to change once
-  observation_error = FALSE, # see note below about safety of log(density) and returning 0 values
-  model = NA,
-  re_form = NULL # NULL to specify a simulation conditional on fitted random
-  # effects (this only simulates observation error). ~0 or NA to simulate new
-  # random effects
-) # returns response scale values
+  newdata = prediction_grid,
+  sims_vars = "eta_i", #@FIXME - should only return eta, not epsilon_st?
+  sim_re = c(0, 1, 0, 0, 1, 0), #@Check - ask andrew if there is a reason default is no sampling from spatial RF (and are there problematic implications with us not doing this for using the nsim > 0 methods? Using these as estimated at their best MLEs from joint if = 0? -in this dogfish demo - note that the spatial field collapsed so it has been turned off anyway)
+  nsim = 50,
+  uncertainty = "random",
+  model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
+) # returns values in link space
 
-glimpse(historical_sim_preds)
-
-historical_sims <- historical_grid |>
-  mutate(time_period = "historical") |>
-  bind_cols(
-  # log density to match input into get_index_sims; and so that addition of
-  # offset can be calculated in logspace - not sure this actually makes any difference...
-    as_tibble(log(historical_sim_preds), .name_repair = ~ paste0("sim", seq_along(.x)))
-  )
-# @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
-
-
-# @TODO: deal with handling delta models
-if (has_forecast) { # @TODO - make sure this is working
-  projections <- project(
-    fit,
-    newdata = forecast_grid, # @Question - does it make any difference to do on the full prediction grid and then filter to only the forecast years or just use forecast grid? Is this needed to 'connect' each draw to past? Probably not right? because we are treating forecasts separately and summarising the simulated draws anyway. Like if we fix the seed to match in the historical and the forecast project, will the sims 'line up'?
-    sims_vars = "eta_i", #@FIXME - I think this is also not working right - it shouldn't be grabbing espilon_st right?
-    sim_re = c(0, 1, 0, 0, 1, 0), #@Check - ask andrew if there is a reason default is no sampling from spatial RF (and are there problematic implications with us not doing this for using the nsim > 0 methods? Using these as estimated at their best MLEs from joint if = 0? -in this dogfish demo - note that the spatial field collapsed so it has been turned off anyway)
-    nsim = 50,
-    uncertainty = "random",
-    model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
-  ) # returns values in link space
-  meep() # you can add your username if you find this function helpful (custom beepr::beep() to ping for specific users)
+meep() # you can add your username if you find this function helpful (custom beepr::beep() to ping for specific users)
 
   # @hack to deal with returning of each delta model estimate
-  if (fit$family$delta) {
-    projections$est <- fit$family[[1]]$linkinv(projections$est1) * fit$family[[2]]$linkinv(projections$est2)
-  }
-
-  forecast_sims <- forecast_grid |>
-    mutate(time_period = "forecast") |>
-    bind_cols(
-      as_tibble(log(projections$est), .name_repair = ~ paste0("sim", seq_along(.x)))
-    )
-} else {
-  forecast_sims <- NULL
+if (fit$family$delta) {
+  projections$est <- fit$family[[1]]$linkinv(projections$est1) * fit$family[[2]]$linkinv(projections$est2)
 }
 
 # @TODO: use data.table because these matrices can be kind of big
 # - see: https://github.com/pbs-assess/dogfish-trends/blob/9e472c7e5202cd232d2035038b41f28df0ddfba0/analysis/016-calculate-weighted-mean-depth.R#L55 onwards for example
 
 # @optimize For larger datasets working with lots of sims could be slow - convert to datatable
-sims <- bind_rows(historical_sims, forecast_sims) |>
+sims <- prediction_grid |>
+  mutate(time_period = ifelse(year <= last_historical_year, "historical", "forecast")) |>
+  bind_cols(
+    as_tibble(log(projections$est), .name_repair = ~ paste0("sim", seq_along(.x)))
+  ) |> # @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
   tidyr::pivot_longer(
     cols = starts_with("sim"),
     names_to = "sim",
@@ -239,7 +213,11 @@ sims <- bind_rows(historical_sims, forecast_sims) |>
     log_abundance = log_density + log(area) # add area in logspace like get_index_sims()
   )
 
-sims_with_total <- bind_rows(sims, sims |> mutate(region = "all")) # This way total and regions processed in single step
+sims_with_total <- if (dplyr::n_distinct(sims$region) > 1) {
+  bind_rows(sims, sims |> mutate(region = "all")) # full domain and regions processed in single step
+} else {
+  sims |> mutate(region = "all") # if only a single region provided
+}
 
 ```
 
