@@ -30,7 +30,6 @@ source(here::here("R", "functions.R"))
 
 ```{r load-model-outputs}
 fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
-print(fit) # re-attaches the TMB pointer after a fresh-session reload; see reinitialize()
 prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
 cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
@@ -144,14 +143,7 @@ Was used in `R/01-data-prep.R` to split the 'all' grid into regions.
 region_borders <- get_region_borders(region_polys)
 region_layer <- if (!is.null(region_polys)) geom_sf(data = region_polys, fill = NA, linewidth = 0.5)
 
-# Separate into historical and forecast grids based on data used in model object
-# (assumes projections not included in model)
-historical_grid <- prediction_grid |> filter(year %in% min(fit$data$year):max(fit$data$year))
-forecast_grid   <- prediction_grid |> filter(year > max(fit$data$year))
-
-has_forecast <- nrow(forecast_grid) > 0L # ignore forecasting if no forecast data
-
-last_historical_year <- max(historical_grid$year) # use for centring so no ambiguity in lm trend intercept
+last_historical_year <- max(fit$data$year) # use for centring so no ambiguity in lm trend intercept
 ```
 
 ```{r questions}
@@ -910,15 +902,14 @@ bind_rows(
   cog_summary,
   edge_summary,
   depth_summary) |>
-  select(indicator, name, time_period, region, estimate, se, units) |>
+  select(name, time_period, region, estimate, se, units) |>
   mutate(across(c(estimate, se), ~ signif(.x, 3))) |>
   knitr::kable(
-    col.names = c("Indicator", "Name", "Time period", "Region", "Estimate", "SE", "Units"), # option to add prob_value
+    col.names = c("Indicator", "Time period", "Region", "Estimate", "SE", "Units"), # option to add prob_value
     align = "llllrrl",
     booktabs = TRUE
   ) |>
   kableExtra::kable_styling(latex_options = c("repeat_header"), font_size = 8) |>
-  kableExtra::column_spec(1, width = "2.1cm") |>
   kableExtra::column_spec(2, width = "4cm") |>
   kableExtra::column_spec(3, width = "1.5cm") |>
   kableExtra::column_spec(4, width = "1.3cm") |>
