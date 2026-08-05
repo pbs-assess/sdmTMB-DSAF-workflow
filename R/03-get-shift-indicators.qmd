@@ -520,50 +520,6 @@ ns <- ggplot(cog, aes(year, est_y)) +
   facet_wrap(~ region)
 ```
 
-```{r cog-builtin-vs-sims}
-#| eval: false
-#| echo: false
-# Compare the get_cog and sims methods
-pred <- predict(fit, newdata = historical_grid, type = "link", return_tmb_object = TRUE)
-cog_builtin <- get_cog(pred, format = "wide", bias_correct = TRUE, area = pred$data$area)
-# meep()
-
-test <- cog |> mutate(d = "sims") |> filter(region == "all", time_period == "historical")
-
-#| fig-width: 9
-#| fig-height: 11
-ggplot(data = cog_builtin) +
-  aes(est_x, est_y) +
-  geom_point(colour = "black", size = 1) +
-  geom_linerange(aes(xmin = lwr_x, xmax = upr_x), linewidth = 0.1, colour = "black") +
-  geom_linerange(aes(ymin = lwr_y, ymax = upr_y), linewidth = 0.1, colour = "black") +
-  geom_point(data = test, size = 0.5) +
-  geom_linerange(data = test,
-    aes(xmin = lwr_x, xmax = upr_x), linewidth = 0.1, colour = "red") +
-  geom_linerange(data = test, aes(ymin = lwr_y, ymax = upr_y), linewidth = 0.1, colour = "red") +
-  facet_wrap(~ year)
-test_year <- 2004:2022
-test_year <- 2011 # @Question: This year is visibly different between the two methods - not sure if this needs further investigation
-test1 <- cog |>
-  filter(region == "all", time_period == "historical") |>
-  filter(year %in% test_year) |>
-  XY_to_sf(coords = c("est_x", "est_y"))
-test2 <- cog_builtin |>
-  filter(year %in% test_year) |>
-  XY_to_sf(coords = c("est_x", "est_y"))
-ggplot() +
-  geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
-  geom_sf(data = pred_cell_sf |> filter(year %in% test_year), aes(fill = density_km2), alpha = 0.4, colour = NA) +
-  scale_fill_viridis_c(trans = "log10") +
-  geom_sf(data = test1, colour = "black", shape = 21) +
-  geom_sf(data = test2, colour = "red") +
-  scale_colour_viridis_c(option = "magma", end = 0.7) +
-  labs(colour = "Year", title = "Centre of gravity trajectory, Pacific Spiny Dogfish (WCVI)") +
-  gfplot::coord_sf_auto(pred_cell_sf) +
-  facet_wrap(~ year)
-
-```
-
 #### Area occupied
 
 Total area containing 90\% of a species' abundance/biomass: describing how spread out a population is and indicating expansion or contraction in regional occupancy through time
