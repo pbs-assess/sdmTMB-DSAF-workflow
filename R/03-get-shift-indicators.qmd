@@ -347,6 +347,13 @@ abundance_summary <- abund_lm_by_sim |>
     units = "log(biomass) / year" # @TODO: generalise the units
   )
 
+a_by_region |>
+  filter(region != "all") |>
+ggplot() +
+  aes(x = year, y = est, ymin = lwr, ymax = upr, colour = region, fill = region) +
+  geom_line() +
+  geom_ribbon(colour = NA, alpha = 0.3)
+
 ```
 
 #### Proportional abundance
