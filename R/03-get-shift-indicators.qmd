@@ -185,7 +185,7 @@ historical data and `project()` for forecasts. No observation error included.
 
 set.seed(2026)
 
-projections <- project(
+projections_re <- project(
   fit,
   newdata = prediction_grid,
   sims_vars = "eta_i", #@FIXME - should only return eta, not epsilon_st?
@@ -195,7 +195,19 @@ projections <- project(
   model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
 ) # returns values in link space
 
+projections_fe <- project(
+  fit,
+  newdata = prediction_grid,
+  sims_vars = "eta_i", #@FIXME - should only return eta, not epsilon_st?
+  nsim = 50,
+  uncertainty = "none",
+  model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
+) # returns values in link space
+
+
 meep() # you can add your username if you find this function helpful (custom beepr::beep() to ping for specific users)
+
+projections <- projections_fe
 
   # @hack to deal with returning of each delta model estimate
 if (fit$family$delta) {
