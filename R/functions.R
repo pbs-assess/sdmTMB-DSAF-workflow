@@ -6,6 +6,14 @@ meep <- function(user = "jilliandunic", ...) {
   }
 }
 
+# combine_delta <- function(.data, fit) {
+#   if (isTRUE(fit$family$delta)) {
+#     fit$family[[1]]$linkinv(.data[, 1, ]) * fit$family[[2]]$linkinv(.data[, 2, ])
+#   } else {
+#     fit$family$linkinv(.data[, 1, ])
+#   }
+# }
+
 #@TODO edit/review documentation
 
 #' Identify which random field columns are active in a fitted model
