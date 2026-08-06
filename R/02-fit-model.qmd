@@ -19,8 +19,11 @@ source(here::here("R", "00-settings.R"))
 source(here::here("R/functions.R"))
 
 dog <- readRDS(file.path(model_input_dir, "dogfish.rds"))
-prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
+prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds")) |>
+  filter(year <= 2040)
 cell_polygons <- readRDS(file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
+
+
 
 ```
 
@@ -35,67 +38,64 @@ dog_mesh <- make_mesh(data = dog, xy_cols = c("X", "Y"), cutoff = 10) # can make
 
 missing_years <- min(dog$year):max(dog$year)
 
-fit_dgg_rw <- local(
+fit_dgg_rw <-
   sdmTMB(
     formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
     offset = log(dog$area_swept),
     family = delta_gengamma(type = "poisson-link"),
     data = dog,
     mesh = dog_mesh,
-    spatial = "on", # "on" collapsed (I'm pretty sure but now I'm second guessing and maybe was just taking forever to run - revisit)
+    spatial = "on",
     spatiotemporal = "rw",
     time = "year",
     extra_time = missing_years,
     control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
     silent = FALSE
   )
-)
 meep()
 fit_dgg_rw |> saveRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
 
 
 # Have two types of models so I can make sure code works with one or two linear predictors
-fit_tw <- local(
+fit_tw <-
   sdmTMB(
     formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
     offset = log(dog$area_swept), # include as smoother later?
-    # family = delta_gengamma(type = "poisson-link"), # wouldn't fit/taking forever
     family = tweedie(link = "log"),
     data = dog,
     mesh = dog_mesh,
     spatial = "on",
-    spatiotemporal = "ar1",
+    spatiotemporal = "rw",
     time = "year",
     extra_time = missing_years,
     control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
     silent = FALSE
   )
-)
 fit_tw
 
 # fit_tv <- local(update(fit, time_varying = ~ 1, time_varying_type = "ar1"))
 # sanity(fit_tv)
 
-fit_ln <- local(
+fit_ln <-
   sdmTMB(
     formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
     offset = log(dog$area_swept), # include as smoother later?
-    family = delta_lognormal(type = "poisson-link"), # @QUESTION: Should this always be a poisson link where possible?
+    family = delta_lognormal(type = "poisson-link"),
     data = dog,
     mesh = dog_mesh,
-    spatial = "off", # on collapsed (I'm pretty sure but now I'm second guessing and maybe was just taking forever to run - revisit)
-    spatiotemporal = "ar1",
+    spatial = "on",
+    spatiotemporal = "rw",
     time = "year",
     extra_time = missing_years,
     control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
     silent = FALSE
   )
-)
+
 sanity(fit_ln)
 
 fit_ln_tv <- local(
   update(
-    fit_ln, time_varying = ~ 1, time_varying_type = "ar1"
+    fit_ln, time_varying = ~ 1, time_varying_type = "rw"
   )
 )
 
@@ -110,30 +110,30 @@ sanity(fit_ln_tv)
 
 fit_ln_tv <- local(
   update(
-    fit_ln, time_varying = ~ 1, time_varying_type = "ar1"
+    fit_ln, time_varying = ~ 1, time_varying_type = "rw"
   )
 )
 
-fit_dgg_tv <- local(
+fit_dgg_tv <-
   sdmTMB(
     formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
     offset = log(dog$area_swept),
     family = delta_gengamma(type = "poisson-link"),
     data = dog,
     mesh = dog_mesh,
-    spatial = "on", # "on" collapsed (I'm pretty sure but now I'm second guessing and maybe was just taking forever to run - revisit)
-    spatiotemporal = "ar1",
+    spatial = "on",
+    spatiotemporal = "rw",
     time = "year",
     time_varying = ~ 1,
-    time_varying_type = "ar1",
+    time_varying_type = "rw",
     extra_time = missing_years,
     control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
     silent = FALSE
   )
-)
+
 meep()
 
-AIC(fit_tw, fit_ln, fit_dgg, fit_ln_tv, fit_dgg_tv)
+AIC(fit_tw, fit_ln, fit_dgg_rw, fit_ln_tv, fit_dgg_tv)
 ```
 
 ```{r}
@@ -142,6 +142,7 @@ fit_tw |> saveRDS(file.path(fit_dir, "dogfish-tweedie.rds"))
 fit_ln_tv |> saveRDS(file.path(fit_dir, "dogfish-ln-tv.rds"))
 fit_dgg |> saveRDS(file.path(fit_dir, "dogfish-dgg.rds"))
 fit_dgg_tv |> saveRDS(file.path(fit_dir, "dogfish-dgg-tv.rds"))
+fit_dgg_rw |> saveRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
 
 ```
 
@@ -151,7 +152,7 @@ fit_dgg_tv |> saveRDS(file.path(fit_dir, "dogfish-dgg-tv.rds"))
 ```{r}
 # Temporary load models so I don't have to run above model fits to look at diagnostics
 # fit <- readRDS(file.path(fit_dir, "dogfish-tweedie.rds"))
-fit <- readRDS(file.path(fit_dir, "dogfish-ln-tv.rds"))
+fit <- readRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
 
 # @Note: missing years/alternating years/seesaw - from what I saw in power analysis, could this be a problem here? see note in diagnostics section of @R/02-fit-model.qmd
 ```
@@ -235,12 +236,12 @@ plot_field(pred_poly, fit, "epsilon_st", "Spatiotemporal random field")
 # Temporary load models so I don't have to run above model fits to look at diagnostics
 # fit <- readRDS(file.path(fit_dir, "dogfish-tweedie.rds"))
 # fit <- readRDS(file.path(fit_dir, "dogfish-ln-tv.rds"))
-fit <- readRDS(file.path(fit_dir, "dogfish-dgg.rds"))
+fit <- readRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
 ```
 
 
 ```{r}
-out <- project(fit, newdata = prediction_grid, nsim = 50) # values in link space
+out <- project(fit, newdata = prediction_grid, nsim = 200, offset = rep(0, nrow(prediction_grid))) # values in link space
 
 glimpse(out)
 
@@ -252,7 +253,7 @@ est_se <- apply(out$est, 1, sd)
 
 # visualize:
 prediction_grid$est_mean <- est_mean
-ggplot(subset(prediction_grid, year > 2021), aes(X, Y, fill = est_mean)) +
+ggplot(subset(prediction_grid, year > 2021), aes(X, Y, fill = log(est_mean))) +
   geom_raster() +
   facet_wrap(~year) +
   coord_fixed() +

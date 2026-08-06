@@ -157,17 +157,37 @@ summarise_sim_trend <- function(df, value, by) {
 #' @return A data frame with `by` columns, `edge`, and `{rank_var}_edge`
 #'   (interpolated value of `rank_var` at each quantile).
 get_range_edge_sim <- function(df, rank_var, quantiles, by) {
-  edge_col <- paste0(rlang::as_label(rlang::enquo(rank_var)), "_edge")
+  rank_name <- rlang::as_name(rlang::ensym(rank_var))
+  by_names <- names(dplyr::select(df, {{ by }}))
+  edge_col <- paste0(rank_name, "_edge")
 
-  df |>
-    mutate(.rank_var = {{ rank_var }}) |>
-    group_by(pick({{ by }})) |>
-    arrange(.rank_var, .by_group = TRUE) |>
-    mutate(cumul_prop = cumsum(exp(log_abundance)) / sum(exp(log_abundance))) |> #L.201 - 203 in get-range-edge.R sdmTMB
-    reframe(
+  dt <- data.table::as.data.table(
+    df[, c(by_names, rank_name, "log_abundance"), drop = FALSE]
+  )
+
+  # Sorting once globally is substantially cheaper than arranging within each
+  # dplyr group. The cumulative abundance calculation still occurs per group.
+  data.table::setorderv(dt, c(by_names, rank_name))
+  dt[, cumul_prop := cumsum(exp(log_abundance)) / sum(exp(log_abundance)),
+     by = by_names]
+
+  out <- dt[, {
+    edge_values <- approx(
+      cumul_prop,
+      get(rank_name),
+      xout = quantiles,
+      rule = 2,
+      ties = "ordered"
+    )$y
+
+    data.table::data.table(
       edge = names(quantiles),
-      "{edge_col}" := approx(cumul_prop, .rank_var, xout = quantiles, rule = 2, ties = "ordered")$y
+      edge_value = edge_values
     )
+  }, by = by_names]
+
+  data.table::setnames(out, "edge_value", edge_col)
+  tibble::as_tibble(out)
 }
 
 #@TODO review docs

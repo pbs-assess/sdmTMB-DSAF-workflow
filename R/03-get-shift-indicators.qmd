@@ -32,7 +32,8 @@ source(here::here("R", "functions.R"))
 fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg-rw", ".rds")))
 # fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
 # fit <- readRDS(file.path(fit_dir, paste0("dogfish-tweedie", ".rds")))
-prediction_grid0 <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
+prediction_grid0 <- readRDS(file.path(model_input_dir, "prediction-grid.rds")) |>
+  filter(year <= 2040)
 cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
 # Multiple regions not required to work
@@ -182,53 +183,70 @@ set.seed(2026)
 
 prediction_grid <- prediction_grid0 |> filter(year <= 2035)
 
-projections_fe <- project(
+projections <- project(
   fit,
   newdata = prediction_grid,
-  nsim = 200, # change to >100 for demo
-  sample_parameters = FALSE, # if FALSE: theta at mode, b at mode → lp = lpb exactly, replicated. Zero stochasticity = single line.
-  sample_historical_re = TRUE, # TRUE:
-  sample_future_re = TRUE,
-  sims_var = "eta_i",
-  simulate_re = c(
-      spatial = FALSE,
-      spatiotemporal = TRUE,
-      spatial_varying = FALSE,
-      iid = FALSE,
-      time_varying = TRUE,
-      smoothers = FALSE
-    ),
-  model = NA
-)
-meep()
-
-projections_re <- project(
-  fit,
-  newdata = prediction_grid |> filter(year <= 2035),
-  nsim = 200, # change to >100 for demo
-  sample_parameters = TRUE, # if FALSE: theta at mode, b at mode → lp = lpb exactly, replicated. Zero stochasticity = single line.
+  nsim = 400,
+  sample_fe = FALSE,
   sample_historical_re = TRUE,
   sample_future_re = TRUE,
-  sims_var = "eta_i",
-  simulate_re = c(
-      spatial = FALSE,
-      spatiotemporal = TRUE,
-      spatial_varying = FALSE,
-      iid = FALSE,
-      time_varying = TRUE, # dgg model only doesn't have any
-      smoothers = FALSE
-    )
+  offset = rep(0, nrow(prediction_grid))
 )
+
+# projections_fe <- project(
+#   fit,
+#   newdata = prediction_grid,
+#   nsim = 400,
+#   sample_fe = FALSE,
+#   sample_historical_re = TRUE,
+#   sample_future_re = TRUE,
+#   future_re = "fix",
+#   offset = rep(0, nrow(prediction_grid))
+# )
+
 meep()
 
-sims_fe <- make_sims_df(prediction_grid, projections_fe, last_historical_year) |>
-  mutate(type = "fe")
+# projections_re <- project(
+#   fit,
+#   newdata = prediction_grid |> filter(year <= 2035),
+#   nsim = 200, # change to >100 for demo
+#   sample_parameters = TRUE, # if FALSE: theta at mode, b at mode → lp = lpb exactly, replicated. Zero stochasticity = single line.
+#   sample_historical_re = TRUE,
+#   sample_future_re = TRUE,
+#   sims_var = "eta_i",
+#   simulate_re = c(
+#       spatial = FALSE,
+#       spatiotemporal = TRUE,
+#       spatial_varying = FALSE,
+#       iid = FALSE,
+#       time_varying = TRUE, # dgg model only doesn't have any
+#       smoothers = FALSE
+#     )
+# )
+meep()
 
-sims_re <- make_sims_df(prediction_grid, projections_re, last_historical_year) |>
-  mutate(type = "re")
+projection_log_density <- projections$est1 + projections$est2
+# projection_fe_log_density <- projections_fe$est1 + projections_fe$est2
 
-sims <- sims_fe
+sims_re <- make_sims_df(
+    prediction_grid,
+    projection_log_density,
+    last_historical_year
+  ) |>
+    mutate(type = "re")
+
+  sims_fe <- make_sims_df(
+    prediction_grid,
+    projection_fe_log_density,
+    last_historical_year
+  ) |>
+    mutate(type = "fe")
+
+sims <- sims_re
 # sims <- sims_re
+
+saveRDS(sims_re, file.path(model_out_dir, "sims_re.rds"))
+saveRDS(sims_fe, file.path(model_out_dir, "sims_fe.rds"))
 
 ```
 
@@ -283,7 +301,7 @@ ggplot() +
 ```
 
 ```{r pred-cell-sf}
- n# For plotting background - make predictions into sf object
+# For plotting background - make predictions into sf object
 pred_cell_sf <- sims |>
   group_by(time_period, year, cell, region) |>
   summarise(density_km2 = exp(median(log_density)), .groups = "drop") |>
@@ -517,11 +535,27 @@ cog_segments_sf <- cog_sf |>
   dplyr::group_split(region, time_period) |>
   purrr::map(make_cog_segments) |>
   purrr::compact() |>
-  purrr::reduce(rbind)
+  purrr::reduce(rbind) |>
+  filter(region == "all")
 
 prediction_background <- pred_cell_sf |>
   select(-region) |>
   filter(year == last_historical_year | year == 2060)
+
+ggplot() +
+  geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
+  geom_sf(data = prediction_background, aes(fill = density_km2), alpha = 0.4, colour = NA) +
+  scale_fill_viridis_c(trans = "log10") +
+  geom_sf(data = cog_segments_sf, aes(colour = year), linewidth = 0.8,
+        arrow = grid::arrow(length = unit(0.18, "cm"), type = "closed")) +
+  # geom_sf(data = cog_sf |> slice_max(year), aes(colour = year), size = 3) +
+  scale_colour_viridis_c(option = "magma", end = 0.7) +
+  # geom_sf(data = region_borders) +
+  labs(colour = "Year", title = "Centre of gravity trajectory, Pacific Spiny Dogfish (WCVI)") +
+  gfplot::coord_sf_auto(pred_cell_sf) +
+  facet_grid(region ~ time_period)
+dir.create("figs")
+ggsave("figs/cog-dogfish-eg.png", width = 7, height = 4)
 
 ggplot() +
   geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
@@ -535,6 +569,7 @@ ggplot() +
   labs(colour = "Year", title = "Centre of gravity trajectory, Pacific Spiny Dogfish (WCVI)") +
   gfplot::coord_sf_auto(pred_cell_sf) +
   facet_grid(region ~ time_period)
+
 
 # These are not plotted right now but we could print them
 ew <- ggplot(cog, aes(year, est_x)) +
@@ -738,6 +773,7 @@ area_plots[[3]]
 * Change in the position of the southernmost (trailing, 5% quantile) range edge and northernmost (leading, 95% quantile) range edge of modeled species' distribution
 
 * Trailing edge (5% quantile): the latitude beyond which (southward) no more than
+
   5% of the population's (density-weighted) abundance extends.
 
 * Leading edge (95% quantile): the latitude beyond which (northward) no more than
