@@ -283,6 +283,7 @@ ggplot() +
 ```
 
 ```{r pred-cell-sf}
+ n# For plotting background - make predictions into sf object
 pred_cell_sf <- sims |>
   group_by(time_period, year, cell, region) |>
   summarise(density_km2 = exp(median(log_density)), .groups = "drop") |>
@@ -353,7 +354,26 @@ a_by_region |>
 ggplot() +
   aes(x = year, y = est, ymin = lwr, ymax = upr, colour = region, fill = region) +
   geom_line() +
-  geom_ribbon(colour = NA, alpha = 0.3)
+  geom_ribbon(colour = NA, alpha = 0.3) +
+  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey30") +
+  coord_cartesian(expand = FALSE)
+
+a_by_sim |>
+  filter(region == "all") |>
+ggplot() +
+  aes(x = year, y = log(total_abundance), colour = region, fill = region, group = interaction(sim, region)) +
+geom_ribbon(data = a_by_region |> filter(region == "all"),
+  aes(y = log(est), ymin = log(lwr), ymax = log(upr), group = NULL),
+  fill = blues[[1]], colour = NA, alpha = 0.7) +
+  geom_line(colour = blues[[4]], alpha = 0.3) +
+  geom_line(data = a_by_region |> filter(region == "all"),
+    aes(y = log(est), group = NULL),
+    colour = blues[[5]], linewidth = 1) +
+  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey30") +
+  coord_cartesian(expand = FALSE, clip = "on") +
+  facet_wrap(~ region, ncol = 1) +
+  ggtitle(unique(sims$type))
+
 
 ```
 
