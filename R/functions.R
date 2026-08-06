@@ -170,6 +170,74 @@ get_range_edge_sim <- function(df, rank_var, quantiles, by) {
     )
 }
 
+#@TODO review docs
+#@TODO use data.table because these matrices can be kind of big -- see:
+#  https://github.com/pbs-assess/dogfish-trends/blob/9e472c7e5202cd232d2035038b41f28df0ddfba0/analysis/016-calculate-weighted-mean-depth.R#L55
+#@optimize for larger datasets working with lots of draws this could be slow
+
+#' Tidy a `project()` draws matrix into a long data frame
+#'
+#' Logs a matrix of link-space draws (e.g. `projections_re` or
+#' `projections_fe` after `combine_delta()`), binds it onto `prediction_grid`,
+#' and pivots to one row per cell x year x draw -- the shared shape every
+#' shift-indicator function downstream (`summarise_sim_trend()`,
+#' `get_range_edge_sim()`, etc.) expects. Lets different `project()` scenarios
+#' be pushed through the same indicator pipeline and compared.
+#'
+#' @param prediction_grid The `newdata` grid passed to `project()` -- one row
+#'   per cell x region x year, must contain `year`, `area`, and `region`.
+#' @param projections Matrix of link-space draws with rows matching
+#'   `prediction_grid` and one column per draw (`project()`'s `nsim`).
+#' @param last_historical_year Last year with survey data; splits
+#'   `time_period` into `"historical"`/`"forecast"`.
+#'
+#' @note Only safe to log `projections` because these are expected-density
+#'   draws (`observation_error = FALSE`): `plogis(eta1) * exp(eta2)`, which is
+#'   strictly positive. No observation-level noise is added, so this is not
+#'   the same object `simulate(..., observation_error = TRUE)` would give you.
+#'
+#'   What varies across `draw` depends entirely on the `project()` call that
+#'   produced `projections`, not on this function:
+#'   * `uncertainty = "random"` -- theta (fixed effects) and any `sim_re`-on
+#'     random effects are sampled from their approximate joint distribution
+#'     (`mle-mvn`); these are genuine posterior-predictive-style draws.
+#'   * `uncertainty = "none"` -- theta is fixed at the MLE in every draw.
+#'     Historical rows are then bit-for-bit identical across all `draw`
+#'     values; only forecast-year rows vary, and only if `sim_re` turns on
+#'     forward simulation of the AR1 process there. Don't be surprised when a
+#'     CI computed on the historical portion of such a run comes out zero
+#'     width -- that is correct, not a bug.
+#'
+#' @return A data frame shaped like `prediction_grid`, with added `draw`,
+#'   `time_period`, `log_density`, `log_abundance` (density x cell area, in
+#'   logspace like `get_index_sims()`) columns. Doubled with a
+#'   `region == "all"` copy alongside the named regions (or renamed to
+#'   `"all"` outright if `prediction_grid` only has one region).
+make_sims_df <- function(prediction_grid, projections, last_historical_year) {
+  sims <- prediction_grid |>
+    mutate(time_period = ifelse(year <= last_historical_year, "historical", "forecast")) |>
+    bind_cols(
+      as_tibble(projections, .name_repair = ~ paste0("sim", seq_along(.x)))
+    ) |>
+    tidyr::pivot_longer(
+      cols = starts_with("sim"),
+      names_to = "sim",
+      names_pattern = "^sim(\\d+)",
+      names_transform = list(sim = as.integer),
+      values_to = "log_density" # assuming offset = 1km2 (log(offset) = 0 used in prediction)
+    ) |>
+    mutate(
+      time_period = factor(time_period, levels = c("historical", "forecast")),
+      log_abundance = log_density + log(area) # add area in logspace like get_index_sims()
+    )
+
+  if (dplyr::n_distinct(sims$region) > 1) {
+    bind_rows(sims, sims |> mutate(region = "all")) # full domain and regions processed in single step
+  } else {
+    sims |> mutate(region = "all") # if only a single region provided
+  }
+}
+
 #@TODO: TEST ME with more data
 #' Shared internal borders between adjacent region polygons
 #'

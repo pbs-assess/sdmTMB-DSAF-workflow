@@ -29,8 +29,10 @@ source(here::here("R", "functions.R"))
 ```
 
 ```{r load-model-outputs}
-fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
-prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
+fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg-rw", ".rds")))
+# fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
+# fit <- readRDS(file.path(fit_dir, paste0("dogfish-tweedie", ".rds")))
+prediction_grid0 <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
 cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
 # Multiple regions not required to work
@@ -62,7 +64,7 @@ that instead, projections are done here using `project()`. This could be adjuste
 
 ```{r}
 #| results: markup
-head(prediction_grid)
+head(prediction_grid0)
 ```
 
 One row per `cell` x `region` x `year`. This is the `newdata` passed to
@@ -174,64 +176,59 @@ historical data and `project()` for forecasts. No observation error included.
 ```{r sim-draws}
 #| cache: true
 #| cache.extra: !expr tools::md5sum(c(file.path(fit_dir, "dogfish-dgg.rds"), file.path(model_input_dir, "prediction-grid.rds")))
+# @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
 
 set.seed(2026)
 
-projections_re <- project(
-  fit,
-  newdata = prediction_grid,
-  sims_vars = "eta_i", #@FIXME - should only return eta, not epsilon_st?
-  sim_re = c(0, 1, 0, 0, 1, 0), #@Check - ask andrew if there is a reason default is no sampling from spatial RF (and are there problematic implications with us not doing this for using the nsim > 0 methods? Using these as estimated at their best MLEs from joint if = 0? -in this dogfish demo - note that the spatial field collapsed so it has been turned off anyway)
-  nsim = 50,
-  uncertainty = "random",
-  model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
-) # returns values in link space
+prediction_grid <- prediction_grid0 |> filter(year <= 2035)
 
 projections_fe <- project(
   fit,
   newdata = prediction_grid,
-  sims_vars = "eta_i", #@FIXME - should only return eta, not epsilon_st?
-  nsim = 50,
-  uncertainty = "none",
-  model = NA # @FIXME - I think this should allow us to get the combined estimate, but it's not combining them?
-) # returns values in link space
+  nsim = 200, # change to >100 for demo
+  sample_parameters = FALSE, # if FALSE: theta at mode, b at mode → lp = lpb exactly, replicated. Zero stochasticity = single line.
+  sample_historical_re = TRUE, # TRUE:
+  sample_future_re = TRUE,
+  sims_var = "eta_i",
+  simulate_re = c(
+      spatial = FALSE,
+      spatiotemporal = TRUE,
+      spatial_varying = FALSE,
+      iid = FALSE,
+      time_varying = TRUE,
+      smoothers = FALSE
+    ),
+  model = NA
+)
+meep()
 
+projections_re <- project(
+  fit,
+  newdata = prediction_grid |> filter(year <= 2035),
+  nsim = 200, # change to >100 for demo
+  sample_parameters = TRUE, # if FALSE: theta at mode, b at mode → lp = lpb exactly, replicated. Zero stochasticity = single line.
+  sample_historical_re = TRUE,
+  sample_future_re = TRUE,
+  sims_var = "eta_i",
+  simulate_re = c(
+      spatial = FALSE,
+      spatiotemporal = TRUE,
+      spatial_varying = FALSE,
+      iid = FALSE,
+      time_varying = TRUE, # dgg model only doesn't have any
+      smoothers = FALSE
+    )
+)
+meep()
 
-meep() # you can add your username if you find this function helpful (custom beepr::beep() to ping for specific users)
+sims_fe <- make_sims_df(prediction_grid, projections_fe, last_historical_year) |>
+  mutate(type = "fe")
 
-projections <- projections_fe
+sims_re <- make_sims_df(prediction_grid, projections_re, last_historical_year) |>
+  mutate(type = "re")
 
-  # @hack to deal with returning of each delta model estimate
-if (fit$family$delta) {
-  projections$est <- fit$family[[1]]$linkinv(projections$est1) * fit$family[[2]]$linkinv(projections$est2)
-}
-
-# @TODO: use data.table because these matrices can be kind of big
-# - see: https://github.com/pbs-assess/dogfish-trends/blob/9e472c7e5202cd232d2035038b41f28df0ddfba0/analysis/016-calculate-weighted-mean-depth.R#L55 onwards for example
-
-# @optimize For larger datasets working with lots of sims could be slow - convert to datatable
-sims <- prediction_grid |>
-  mutate(time_period = ifelse(year <= last_historical_year, "historical", "forecast")) |>
-  bind_cols(
-    as_tibble(log(projections$est), .name_repair = ~ paste0("sim", seq_along(.x)))
-  ) |> # @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
-  tidyr::pivot_longer(
-    cols = starts_with("sim"),
-    names_to = "sim",
-    names_pattern = "^sim(\\d+)",
-    names_transform = list(sim = as.integer),
-    values_to = "log_density" # assuming offset = 1km2 (log(offset) = 0 used in prediction)
-  ) |>
-  mutate(
-    time_period = factor(time_period, levels = c("historical", "forecast")),
-    log_abundance = log_density + log(area) # add area in logspace like get_index_sims()
-  )
-
-sims_with_total <- if (dplyr::n_distinct(sims$region) > 1) {
-  bind_rows(sims, sims |> mutate(region = "all")) # full domain and regions processed in single step
-} else {
-  sims |> mutate(region = "all") # if only a single region provided
-}
+sims <- sims_fe
+# sims <- sims_re
 
 ```
 
@@ -245,7 +242,8 @@ Visualise the species distributions for the historical and full series.
 sims |>
   filter(time_period == "historical") |>
   group_by(time_period, year, cell, region) |>
-  # filter(sim == 3) |>
+  filter(sim == 3) |>
+  filter(year %in% seq(2004, 2022,  by = 4)) |>
   summarise(log_density = median(log_density)) |>
   left_join(cell_polygons, y = _) |>
   tidyr::drop_na(log_density) |>
@@ -267,9 +265,9 @@ ggplot() +
 sims |>
   # filter(time_period == "forecast") |>
   # filter(year %in% seq(last_historical_year + 1, 2060, by = 2)) |>
-  filter(year %in% seq(2005, 2060, by = 2)) |>
-  group_by(time_period, year, cell, region) |>
+  filter(year %in% seq(2005, 2060,  by = 4)) |>
   # filter(sim == 3) |>
+  group_by(time_period, year, cell, region) |>
   summarise(log_density = median(log_density)) |>
   left_join(cell_polygons, y = _) |>
   tidyr::drop_na(log_density) |>
@@ -285,7 +283,6 @@ ggplot() +
 ```
 
 ```{r pred-cell-sf}
-# For plotting background - make predictions into sf object
 pred_cell_sf <- sims |>
   group_by(time_period, year, cell, region) |>
   summarise(density_km2 = exp(median(log_density)), .groups = "drop") |>
@@ -325,7 +322,7 @@ total weight of individuals
   # agg_function = function(x) sum(exp(x)) - because values must come logged
 
 # Calculate annual abundance for each simulated draw
-a_by_sim <- sims_with_total |>
+a_by_sim <- sims |>
   group_by(time_period, region, year, sim) |>
   summarise(total_abundance = sum(exp(log_abundance)), .groups = "drop")
 
@@ -441,7 +438,7 @@ $$
 
 
 ```{r get-cog}
-cog_by_sim <- sims_with_total |>
+cog_by_sim <- sims |>
   group_by(time_period, region, year, sim) |>
   summarise(
     x = weighted.mean(X, w = exp(log_abundance)), # same as: x = sum(exp(log_abundance) * X) / sum(exp(log_abundance)),
@@ -544,7 +541,7 @@ Three ways to display it on the shiny app plot:
 -[x] Area Efficiency
 
 ```{r}
-ranked_accumulation_by_sims <- sims_with_total |> # @optimize: may need data.table here
+ranked_accumulation_by_sims <- sims |> # @optimize: may need data.table here
   group_by(time_period, region, year, sim) |>
   # step 1 - rank by density within groups
   arrange(desc(log_density), .by_group = TRUE) |>
@@ -749,14 +746,14 @@ $$\frac{\sum_{i \le k} d_i A}{\sum_i d_i A}$$
 
 range_edge_quantiles <- c(trailing = 0.05, leading = 0.95)
 
-range_edge_NS_by_sim <- sims_with_total |>
+range_edge_NS_by_sim <- sims |>
   filter(region == "all") |>
   get_range_edge_sim(
     rank_var = Y,
     quantiles = range_edge_quantiles,
     by = c(time_period, region, year, sim) # including region keeps the column even though we only use "all"
   )
-range_edge_EW_by_sim <- sims_with_total |>
+range_edge_EW_by_sim <- sims |>
   filter(region == "all") |>
   get_range_edge_sim(
     rank_var = X,
@@ -850,7 +847,7 @@ edge_summary <- bind_rows(
 
 ```{r mean-depth}
 # @Question - mean depth, not mean log_depth correct?
-d_by_sim <- sims_with_total |>
+d_by_sim <- sims |>
   group_by(time_period, region, year, sim) |>
   summarise(
     mean_depth = weighted.mean(depth_m, w = exp(log_abundance)),
