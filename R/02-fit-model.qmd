@@ -12,7 +12,7 @@ execute:
 knitr::opts_chunk$set(results = "hide")
 library(dplyr)
 library(ggplot2)
-library(sdmTMB) # @sdmTMB::project conflicts with terra::project (I use namespaced terra calls in R/01-data-prep.qmd)
+library(sdmTMB) # pak::pak('sdmTMB/sdmTMB@project2')
 library(sf)
 
 source(here::here("R", "00-settings.R"))
@@ -31,9 +31,28 @@ cell_polygons <- readRDS(file = file.path(model_input_dir, "wcvi-cell-polygons.r
 * Autoregressive models to allow for forecasting
 
 ```{r}
-dog_mesh <- make_mesh(data = dog, xy_cols = c("X", "Y"), cutoff = 30) # can make smaller later
+dog_mesh <- make_mesh(data = dog, xy_cols = c("X", "Y"), cutoff = 10) # can make smaller later
 
-missing_years <- sdmTMB:::find_missing_time(dog$year) # why not export this?
+missing_years <- min(dog$year):max(dog$year)
+
+fit_dgg_rw <- local(
+  sdmTMB(
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    offset = log(dog$area_swept),
+    family = delta_gengamma(type = "poisson-link"),
+    data = dog,
+    mesh = dog_mesh,
+    spatial = "on", # "on" collapsed (I'm pretty sure but now I'm second guessing and maybe was just taking forever to run - revisit)
+    spatiotemporal = "rw",
+    time = "year",
+    extra_time = missing_years,
+    control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
+    silent = FALSE
+  )
+)
+meep()
+fit_dgg_rw |> saveRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
+
 
 # Have two types of models so I can make sure code works with one or two linear predictors
 fit_tw <- local(
@@ -86,20 +105,35 @@ fit_dgg <- local(
   )
 )
 
-# I SWEAR THIS MODEL WOULD NOT FIT LAST WEEK WHEN I TRIED?!?!?!?!?!?!?! but now it works great and the dgg is awesome?!
-fit_dgg_tv <- local(
-  update(
-    fit_ln, family = delta_gengamma(type = "poisson-link"),
-    time_varying = ~ 1, time_varying_type = "ar1"
-  )
-)
-beepr::beep()
-
 fit_ln_tv
 sanity(fit_ln_tv)
 
-AIC(fit_tw, fit_ln, fit_dgg, fit_ln_tv, fit_dgg_tv)
+fit_ln_tv <- local(
+  update(
+    fit_ln, time_varying = ~ 1, time_varying_type = "ar1"
+  )
+)
 
+fit_dgg_tv <- local(
+  sdmTMB(
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    offset = log(dog$area_swept),
+    family = delta_gengamma(type = "poisson-link"),
+    data = dog,
+    mesh = dog_mesh,
+    spatial = "on", # "on" collapsed (I'm pretty sure but now I'm second guessing and maybe was just taking forever to run - revisit)
+    spatiotemporal = "ar1",
+    time = "year",
+    time_varying = ~ 1,
+    time_varying_type = "ar1",
+    extra_time = missing_years,
+    control = sdmTMBcontrol(collapse_spatial_variance = TRUE),
+    silent = FALSE
+  )
+)
+meep()
+
+AIC(fit_tw, fit_ln, fit_dgg, fit_ln_tv, fit_dgg_tv)
 ```
 
 ```{r}
@@ -107,6 +141,7 @@ AIC(fit_tw, fit_ln, fit_dgg, fit_ln_tv, fit_dgg_tv)
 fit_tw |> saveRDS(file.path(fit_dir, "dogfish-tweedie.rds"))
 fit_ln_tv |> saveRDS(file.path(fit_dir, "dogfish-ln-tv.rds"))
 fit_dgg |> saveRDS(file.path(fit_dir, "dogfish-dgg.rds"))
+fit_dgg_tv |> saveRDS(file.path(fit_dir, "dogfish-dgg-tv.rds"))
 
 ```
 
@@ -188,13 +223,13 @@ plot_field(pred_poly, fit, "epsilon_st", "Spatiotemporal random field")
 ```
 
 
-
-
 # Forecasting
 
 * Note - this is not necessary for running R/03-get-shift-indicators.qmd
 
 * Maybe we want to look at forecast diagnostics here?
+
+* Are we doing some hindcasting here?
 
 ```{r}
 # Temporary load models so I don't have to run above model fits to look at diagnostics
