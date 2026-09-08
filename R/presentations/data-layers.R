@@ -174,3 +174,38 @@ save_thumb <- function(plot, name) {
 save_thumb(catch_map_thumb, "catch-map")
 save_thumb(depth_map_thumb, "depth-map")
 save_thumb(temp_map_thumb, "temp-map")
+
+# ------------------------------------------------------------------------------
+# Depth-relationship thumbnail (nonlinear-effects demo): same physical size as
+# the map thumbnails above so it can swap in as the "Depth" icon next to that
+# term in the model-formula slide. Not a map -- no coord_sf/crop, just matched
+# width/height and the same blank axes/legend theme as the map thumbnails.
+fit <- readRDS(file.path(fit_dir, "dogfish-dgg.rds"))
+dog_fit_data <- readRDS(file.path(model_input_dir, "dogfish.rds"))
+# Delta model: no single combined `est`, so use the positive-catch-rate linear
+# predictor (est2) -- it shares the poly(log_depth, 2) term with the
+# encounter-probability predictor (est1), so either shows the same nonlinear shape.
+dog_fit_data$est <- predict(fit)$est2
+
+depth_nonlinear_thumb <- ggplot(dog_fit_data, aes(depth, est)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_smooth(colour = "#1b6ec2", se = FALSE, linewidth = 1.2) +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank()
+  )
+depth_nonlinear_thumb
+
+save_thumb(depth_nonlinear_thumb, "depth-nonlinear")
+
+
+# ------------------------------------------------------------------------------
+prediction_grid0 |>
+  reframe(mean_bt = mean(bottom_temp), .by = year) |>
+  filter(year <= 2035) |>
+ggplot() +
+  aes(x = year, y = mean_bt) +
+  geom_line() +
+  geom_vline(xintercept = max(dog$year), colour = "grey30", linetype = "dashed")

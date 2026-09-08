@@ -4,6 +4,9 @@ library(ggplot2)
 source(here::here("R", "00-settings.R"))
 source(here::here("R", "functions.R"))
 
+fig_dir <- here::here('presentations', 'figs')
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+
 sims <- sims_re
 
 # sims <- readRDS(file.path(model_out_dir, "sims.rds"))
@@ -65,8 +68,72 @@ p_average_log_density <- ggplot(
   coord_cartesian(expand = FALSE, xlim = c(NA, 2035.3))
 
 p_average_log_density
-dir.create("figs")
-ggsave("figs/dogfish-dgg-rw-projection.png", width = 7, height = 5)
+
+ggsave(file.path(fig_dir, "dogfish-dgg-rw-projection.png"),
+  width = 4.55, height = 3.25
+)
+
+# Historical-only version, no example draws: reuse the built plot rather than
+# rebuilding it from scratch.
+p_average_log_density_historical <- p_average_log_density
+p_average_log_density_historical$layers[[2]] <- NULL # drop example draws layer
+p_average_log_density_historical <- p_average_log_density_historical +
+  filter(average_log_density_summary, year <= last_historical_year)
+p_average_log_density_historical$layers[[3]] <- NULL # drop vline (no future cutoff to mark)
+p_average_log_density_historical <- p_average_log_density_historical +
+  coord_cartesian(expand = FALSE, xlim = c(NA, last_historical_year))
+
+p_average_log_density_historical
+
+ggsave(
+  file.path(fig_dir, "dogfish-dgg-rw-projection_historical-single-line.png"),
+  plot = p_average_log_density_historical,
+  width = 4.55, height = 3.25
+)
+
+# By region
+average_log_density_by_sim_by_region <- sims |>
+  filter(year <= last_historical_year) |>
+  filter(region != "all") |>
+  group_by(year, region, sim) |>
+  summarise(
+    average_log_density = mean(log_density, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+average_log_density_summary_by_region <- average_log_density_by_sim_by_region |>
+  group_by(year, region) |>
+  summarise(
+    mean = mean(average_log_density),
+    q10 = quantile(average_log_density, 0.10),
+    q90 = quantile(average_log_density, 0.90),
+    .groups = "drop"
+  )
+
+set.seed(2026)
+p_average_log_density_by_region <- ggplot(average_log_density_summary_by_region) +
+  aes(x = year, y = mean, colour = region, fill = region, group = region) +
+  geom_ribbon(
+    aes(ymin = q10, ymax = q90),
+    alpha = 0.35,
+    colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_colour_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(
+    x = "Year",
+    y = "Average log density",
+    subtitle = NULL
+  ) +
+  coord_cartesian(expand = FALSE, xlim = c(NA, last_historical_year)) +
+  guides(colour = "none", fill = "none")
+
+p_average_log_density_by_region
+
+ggsave(file.path(fig_dir, "dogfish-dgg-rw-projection_by_region.png"), width = 4.55, height = 3.25)
+
+# --------
 
 range_edge_quantiles <- c(trailing = 0.20, leading = 0.80)
 
@@ -102,14 +169,17 @@ p_range_edges <- ggplot(
   labs(
     x = "Year",
     y = "North–south range edge position (km)",
-    colour = "Edge",
-    fill = "Edge",
+    colour = "Range edge",
+    fill = "Range edge",
     subtitle = "Mean and 80% simulation interval; edges at 20% and 80% abundance"
   ) +
   coord_cartesian(expand = FALSE) +
   scale_colour_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2")
 
-p_range_edges
+# p_range_edges +
+#   theme(legend.position = "top")
+# ggsave(file.path(fit_dir, "dogfish-dgg-range-edge.png"), width = )
+
 
 mean_depth_by_sim <- sims_fe |>
   filter(region == "all") |>
@@ -167,4 +237,4 @@ p_mean_depth <- ggplot(
 
 p_mean_depth
 
-ggsave("figs/range-edges-dog-eg.png", width = 6, height = 4)
+ggsave(file.path(fig_dir, "range-edges-dog-eg.png"), width = 6, height = 4)

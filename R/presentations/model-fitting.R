@@ -2,8 +2,10 @@ library(dplyr)
 library(ggplot2)
 library(sf)
 library(ggsidekick)
+library(sdmTMB)
 
 source('R/00-settings.R')
+source('R/functions.R')
 
 fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
 
@@ -18,10 +20,15 @@ pgrid_2022 <- prediction_grid0 |> filter(year == 2022) |> tidyr::drop_na(bottom_
 pgrid_sf <- left_join(cell_polygons, pgrid)
 pgrid_outline <- pgrid_sf |> sf::st_union() |> sf::st_sf()
 
+region_polys_path <- file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp")
+region_polys <- sf::st_read(region_polys_path, quiet = TRUE)
+
 dog <- sdmTMB::dogfish
 dog_sf <- XY_to_sf(dog)
 
 coast <- pacea::bc_coast
+
+last_historical_year <- max(dog$year)
 
 # Colours
 
@@ -41,21 +48,12 @@ bmap <- ggplot() +
   guides(colour = "none", size = "none", fill = "none")
 
 # ------------------------------------------------------------------------------
-# non-linear depth
-nd <- fit$data |>
-  distinct(X, Y, year, .keep_all = TRUE) |>
-  mutate(bottom_temp = mean(pgrid_2022$bottom_temp))
+sims_re <- readRDS(file.path(model_out_dir, "sims_re.rds"))
 
-pred_2022 <- predict(fit, newdata = nd, type = "link", nsim = 0, model = NA) |>
-  mutate(est = fit$family[[1]]$linkinv(est1) * fit$family[[2]]$linkinv(est2))
+sim1 <- sims_re |> filter(sim == 1)
+sim1_2035_sf <- left_join(cell_polygons, sim1) |>
+  tidyr::drop_na(log_density)
 
-ggplot(data = pred_2022 |> filter(exp(log_depth) < 600)) +
-  aes(x = exp(log_depth), y = log(est), alpha = 0.5) +
-  geom_point() +
-  geom_smooth(se = FALSE) +
-  theme_minimal()
-
-# ------------------------------------------------------------------------------
 # prediction map
 pred_2022 <- predict(fit, newdata = pgrid_2022, type = "link", nsim = 0, model = NA) |>
   mutate(est = fit$family[[1]]$linkinv(est1) * fit$family[[2]]$linkinv(est2))
@@ -67,6 +65,18 @@ dgg_pred_2022 <- bmap +
   scale_fill_viridis_c(trans = "fourth_root_power") +
   gfplot::coord_sf_auto(pred_2022_sf, buffer = -100000)
 dgg_pred_2022
+
+dgg_pred_2022 +
+  geom_sf(data = region_polys, fill = NA, aes(colour = region), linewidth = 2) +
+  scale_colour_brewer(palette = "Dark2") +
+  gfplot::coord_sf_auto(pred_2022_sf)
+
+#
+dgg_proj_2035 <- bmap +
+  geom_sf(data = sim1_2035_sf, aes(fill = exp(log_density))) +
+  scale_fill_viridis_c(trans = "fourth_root_power") +
+  gfplot::coord_sf_auto(pred_2022_sf, buffer = -100000)
+dgg_proj_2035
 
 # spatial field
 fit_tw <- readRDS(file.path(fit_dir, "dogfish-tweedie.rds")) # use tweedie because dgg spatial RF collapsed
@@ -92,27 +102,13 @@ tw_epsilon_st <- bmap +
 # Get plots for index using project
 prediction_grid <- prediction_grid0 |> filter(year <= 2035)
 
-fit_rw <-
+fit_rw <- readRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
+remind_model_info(fit_rw)
 
-projections_fe <- project(
-  fit,
-  newdata = prediction_grid,
-  nsim = 200, # change to >100 for demo
-  sample_parameters = FALSE, # if FALSE: theta at mode, b at mode → lp = lpb exactly, replicated. Zero stochasticity = single line.
-  sample_historical_re = TRUE, # TRUE:
-  sample_future_re = TRUE,
-  sims_var = "eta_i",
-  simulate_re = c(
-      spatial = FALSE,
-      spatiotemporal = TRUE,
-      spatial_varying = FALSE,
-      iid = FALSE,
-      time_varying = TRUE,
-      smoothers = FALSE
-    ),
-  model = NA
-)
-meep()
+fit_rw$spatiotemporal
+
+sims_re <- readRDS
+
 
 sims_fe <- make_sims_df(prediction_grid, projections_fe, last_historical_year) |>
   mutate(type = "fe")
@@ -125,7 +121,7 @@ a_by_region <- a_by_sim |>
   summarise_sim_ci(cols = total_abundance, by = c(time_period, region, year))
 
 a_by_region |>
-  filter(region != "all") |>
+  filter(region == "all") |>
 ggplot() +
   aes(x = year, y = est, ymin = lwr, ymax = upr, colour = region, fill = region) +
   geom_line() +
@@ -140,7 +136,7 @@ ggplot() +
 geom_ribbon(data = a_by_region |> filter(region == "all"),
   aes(y = log(est), ymin = log(lwr), ymax = log(upr), group = NULL),
   fill = blues[[1]], colour = NA, alpha = 0.7) +
-  geom_line(colour = blues[[4]], alpha = 0.3) +
+  # geom_line(colour = blues[[4]], alpha = 0.3) +
   geom_line(data = a_by_region |> filter(region == "all"),
     aes(y = log(est), group = NULL),
     colour = blues[[5]], linewidth = 1) +
@@ -166,5 +162,6 @@ save_panel <- function(plot, name) {
 save_panel(dgg_pred_2022, "model-pred-map-2022")
 save_panel(tw_omega_s, "model-omega_s-map-2022")
 save_panel(tw_epsilon_st, "model-epsilon_st-map-2022")
+save_panel(dgg_proj_2035, "model-proj-map-2035")
 
 
