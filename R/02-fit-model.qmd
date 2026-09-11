@@ -40,7 +40,7 @@ missing_years <- min(dog$year):max(dog$year)
 
 fit_dgg_rw <-
   sdmTMB(
-    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + poly(bottom_temp, 2),
     offset = log(dog$area_swept),
     family = delta_gengamma(type = "poisson-link"),
     data = dog,
@@ -59,7 +59,7 @@ fit_dgg_rw |> saveRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
 # Have two types of models so I can make sure code works with one or two linear predictors
 fit_tw <-
   sdmTMB(
-    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + poly(bottom_temp, 2),
     offset = log(dog$area_swept), # include as smoother later?
     family = tweedie(link = "log"),
     data = dog,
@@ -73,12 +73,9 @@ fit_tw <-
   )
 fit_tw
 
-# fit_tv <- local(update(fit, time_varying = ~ 1, time_varying_type = "ar1"))
-# sanity(fit_tv)
-
 fit_ln <-
   sdmTMB(
-    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + poly(bottom_temp, 2),
     offset = log(dog$area_swept), # include as smoother later?
     family = delta_lognormal(type = "poisson-link"),
     data = dog,
@@ -116,7 +113,7 @@ fit_ln_tv <- local(
 
 fit_dgg_tv <-
   sdmTMB(
-    formula = catch_weight ~ 1 + poly(log_depth, 2) + bottom_temp,
+    formula = catch_weight ~ 1 + poly(log_depth, 2) + poly(bottom_temp, 2),
     offset = log(dog$area_swept),
     family = delta_gengamma(type = "poisson-link"),
     data = dog,
@@ -133,7 +130,11 @@ fit_dgg_tv <-
 
 meep()
 
-AIC(fit_tw, fit_ln, fit_dgg_rw, fit_ln_tv, fit_dgg_tv)
+```
+
+```{r}
+AIC(fit_tw, fit_ln, fit_dgg_rw, fit_ln_tv, fit_dgg_tv) |>
+  arrange(AIC)
 ```
 
 ```{r}
