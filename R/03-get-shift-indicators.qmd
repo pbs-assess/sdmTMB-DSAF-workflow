@@ -29,9 +29,13 @@ source(here::here("R", "functions.R"))
 ```
 
 ```{r load-model-outputs}
-fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg-rw", ".rds")))
-# fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
-# fit <- readRDS(file.path(fit_dir, paste0("dogfish-tweedie", ".rds")))
+model_name <- "dogfish-dgg-rw"
+# model_name <- "dogfish-dgg"
+# model_name <- "dogfish-tweedie"
+fit_path <- file.path(fit_dir, paste0(model_name, ".rds"))
+fit <- readRDS(fit_path)
+remind_model_info(fit)
+
 prediction_grid0 <- readRDS(file.path(model_input_dir, "prediction-grid.rds")) |>
   filter(year <= 2040)
 cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
@@ -176,35 +180,72 @@ historical data and `project()` for forecasts. No observation error included.
 
 ```{r sim-draws}
 #| cache: true
-#| cache.extra: !expr tools::md5sum(c(file.path(fit_dir, "dogfish-dgg.rds"), file.path(model_input_dir, "prediction-grid.rds")))
+#| cache.extra: !expr tools::md5sum(c(fit_path, file.path(model_input_dir, "prediction-grid.rds")))
 # @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
 
-set.seed(2026)
+sims_re_path <- file.path(model_out_dir, paste0("sims_re-", model_name, ".rds"))
+sims_fe_path <- file.path(model_out_dir, paste0("sims_fe-", model_name, ".rds"))
 
-prediction_grid <- prediction_grid0 |> filter(year <= 2035)
+if (file.exists(sims_re_path)) {
+  sims_re <- readRDS(sims_re_path)
+} else {
+  set.seed(2026)
 
-projections <- project(
-  fit,
-  newdata = prediction_grid,
-  nsim = 400,
-  sample_fe = FALSE,
-  sample_historical_re = TRUE,
-  sample_future_re = TRUE,
-  offset = rep(0, nrow(prediction_grid))
-)
+  prediction_grid <- prediction_grid0 |> filter(year <= 2035)
 
-# projections_fe <- project(
-#   fit,
-#   newdata = prediction_grid,
-#   nsim = 400,
-#   sample_fe = FALSE,
-#   sample_historical_re = TRUE,
-#   sample_future_re = TRUE,
-#   future_re = "fix",
-#   offset = rep(0, nrow(prediction_grid))
-# )
+  projections <- project(
+    fit,
+    newdata = prediction_grid,
+    nsim = 50,
+    sample_fe = FALSE,
+    sample_historical_re = TRUE,
+    sample_future_re = TRUE,
+    offset = rep(0, nrow(prediction_grid))
+  )
+  meep()
 
-meep()
+  projection_log_density <- return_density(projections, fit, log = TRUE)
+
+  sims_re <- make_sims_df(
+      prediction_grid,
+      projection_log_density,
+      last_historical_year
+    ) |>
+      mutate(type = "re", model_name = model_name)
+
+  saveRDS(sims_re, sims_re_path)
+}
+
+if (file.exists(sims_fe_path)) {
+  sims_fe <- readRDS(sims_fe_path)
+} else {
+  set.seed(2026)
+
+  prediction_grid <- prediction_grid0 |> filter(year <= 2035)
+
+  projections_fe <- project(
+    fit,
+    newdata = prediction_grid,
+    nsim = 50,
+    sample_fe = FALSE,
+    sample_historical_re = TRUE,
+    sample_future_re = TRUE,
+    future_re = "fix",
+    offset = rep(0, nrow(prediction_grid))
+  )
+  meep()
+
+  projection_fe_log_density <- projections_fe$est1 + projections_fe$est2
+
+  sims_fe <- make_sims_df(
+      prediction_grid,
+      projection_fe_log_density,
+      last_historical_year
+    ) |>
+      mutate(type = "fe", model_name = model_name)
+
+  saveRDS(sims_fe, sims_fe_path)
+}
 
 # projections_re <- project(
 #   fit,
@@ -223,30 +264,10 @@ meep()
 #       smoothers = FALSE
 #     )
 # )
-meep()
-
-projection_log_density <- projections$est1 + projections$est2
-# projection_fe_log_density <- projections_fe$est1 + projections_fe$est2
-
-sims_re <- make_sims_df(
-    prediction_grid,
-    projection_log_density,
-    last_historical_year
-  ) |>
-    mutate(type = "re")
-
-  sims_fe <- make_sims_df(
-    prediction_grid,
-    projection_fe_log_density,
-    last_historical_year
-  ) |>
-    mutate(type = "fe")
+# meep()
 
 sims <- sims_re
-# sims <- sims_re
-
-saveRDS(sims_re, file.path(model_out_dir, "sims_re.rds"))
-saveRDS(sims_fe, file.path(model_out_dir, "sims_fe.rds"))
+# sims <- sims_fe
 
 ```
 
@@ -304,7 +325,7 @@ ggplot() +
 # For plotting background - make predictions into sf object
 pred_cell_sf <- sims |>
   group_by(time_period, year, cell, region) |>
-  summarise(density_km2 = exp(median(log_density)), .groups = "drop") |>
+  summarise(density_km2 = exp(median(log_density)), log_density = median(log_density), .groups = "drop") |>
   left_join(cell_polygons, y = _) |>
   tidyr::drop_na(density_km2)
 ```

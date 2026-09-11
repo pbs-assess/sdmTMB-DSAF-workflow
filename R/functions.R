@@ -6,13 +6,122 @@ meep <- function(user = "jilliandunic", ...) {
   }
 }
 
-# combine_delta <- function(.data, fit) {
-#   if (isTRUE(fit$family$delta)) {
-#     fit$family[[1]]$linkinv(.data[, 1, ]) * fit$family[[2]]$linkinv(.data[, 2, ])
-#   } else {
-#     fit$family$linkinv(.data[, 1, ])
-#   }
-# }
+#' Combine `project()` linear predictors into density or log density
+#'
+#' Applies each linear predictor's own `linkinv()` before combining, so this
+#' works for single-linear-predictor models, standard delta models (e.g.
+#' logit + log), and poisson-link delta models alike -- no assumption about
+#' which links were used. For poisson-link families the log-density case
+#' reduces to `est1 + est2` because both components use a log link; for
+#' standard delta models it does not, so the two forms aren't interchangeable.
+#'
+#' Always sums in log space first, then exponentiates only if `log = FALSE`.
+#' For poisson-link delta models both components are unbounded `exp()`
+#' outputs, so their product can overflow to `Inf` even when each component
+#' is individually representable -- computing the product before logging
+#' would lose an otherwise-finite log-density to that overflow.
+#'
+#' @param projections Output of `project()`: an `est1`/`est2` list for delta
+#'   models, or an object with `est1` for single-linear-predictor models.
+#' @param fit A fitted sdmTMB model object.
+#' @param log If `TRUE` (default), return log density. If `FALSE`, return
+#'   density on the natural scale (`exp()` of the log density) -- this can
+#'   legitimately be `Inf` for poisson-link models if the log density itself
+#'   overflows double precision once exponentiated.
+#'
+#' @return A matrix of log-density (or density) draws, one row per `newdata`
+#'   row and one column per `nsim` draw.
+return_density <- function(projections, fit, log = TRUE) {
+  if (isTRUE(fit$family$delta)) {
+    log_density <- log(fit$family[[1]]$linkinv(projections$est1)) +
+      log(fit$family[[2]]$linkinv(projections$est2))
+  } else {
+    log_density <- log(fit$family$linkinv(projections$est1))
+  }
+  if (log) log_density else exp(log_density)
+}
+
+#' Print a reminder of key model configuration
+#'
+#' Surfaces the settings most likely to affect how shift indicators should
+#' be interpreted -- model formula, spatial/spatiotemporal random field
+#' structure, time-varying terms, and family -- as a `cli` message. Meant to be called
+#' once near the top of a `.qmd` so this isn't easy to lose track of while
+#' working through a long script.
+#'
+#' @param fit A fitted sdmTMB model object.
+#'
+#' @return `fit`, invisibly.
+remind_model_info <- function(fit) {
+  is_delta <- isTRUE(fit$family$delta)
+
+  label_by_component <- function(x) {
+    if (is_delta) paste0(x, " (", seq_along(x), ")", collapse = ", ") else x
+  }
+
+  time_varying <- if (is.null(fit$time_varying)) "none" else deparse(fit$time_varying)
+
+  family_label <- if (!is.null(fit$family$clean_name)) {
+    fit$family$clean_name
+  } else {
+    paste0(fit$family$family[1], "(link = '", fit$family$link[1], "')")
+  }
+
+  formula_label <- label_by_component(purrr::map_chr(fit$formula, deparse1))
+
+  cli::cli_inform(c(
+    "!" = "Model configuration reminder:",
+    "*" = "Formula: {formula_label}",
+    "*" = "Spatial: {label_by_component(fit$spatial)}",
+    "*" = "Spatiotemporal: {label_by_component(fit$spatiotemporal)}",
+    "*" = "Time-varying: {time_varying}",
+    "*" = "Family: {family_label}"
+  ))
+
+  invisible(fit)
+}
+
+#' Auto-derive a model name from its configuration
+#'
+#' Builds a filesystem-safe slug encoding the modeling axes this project
+#' actually varies (family, spatiotemporal RF, time-varying), so a model's
+#' filename records what it actually is instead of a hand-picked mnemonic
+#' that can drift out of sync with the fit (e.g. implying AR1 for a model
+#' that's actually RW). Spatiotemporal and time-varying get separate
+#' `st-`/`tv-` tags since both can independently be RW or AR1 -- and the
+#' latter's type isn't even a top-level field on the fit object (it's buried
+#' in `fit$tmb_data$ar1_time`; even `print.sdmTMB()` doesn't label it) --
+#' conflating the two is the exact ambiguity this replaces.
+#'
+#' This name is meant to be the single record of model config -- used as the
+#' filename, and carried into `sims_re`/`sims_fe` as the `model_name` column
+#' -- rather than also keeping a separate descriptive label in sync.
+#'
+#' Scoped deliberately to axes this project currently varies. Add a tag here
+#' if/when a genuinely new axis gets used (e.g. threshold effects) -- don't
+#' pre-build support for structure nothing here uses yet.
+#'
+#' @param fit A fitted sdmTMB model object.
+#' @param label A short human label for the species/dataset -- the one piece
+#'   this can't recover from `fit` itself, e.g. `"dogfish"`.
+#'
+#' @return A length-1 character string safe for use as a filename (no
+#'   extension).
+build_model_name <- function(fit, label) {
+  family <- if (!is.null(fit$family$clean_name)) {
+    sub("\\(.*", "", fit$family$clean_name)
+  } else {
+    fit$family$family[1]
+  }
+
+  st_tag <- paste(unique(unlist(fit$spatiotemporal)), collapse = "-")
+
+  tv_tag <- if (is.null(fit$time_varying)) {
+    NULL
+  } else if (isTRUE(fit$tmb_data$ar1_time == 1)) "tv-ar1" else "tv-rw"
+
+  paste(c(label, family, paste0("st-", st_tag), tv_tag), collapse = "-")
+}
 
 #@TODO edit/review documentation
 
@@ -197,8 +306,8 @@ get_range_edge_sim <- function(df, rank_var, quantiles, by) {
 
 #' Tidy a `project()` draws matrix into a long data frame
 #'
-#' Logs a matrix of link-space draws (e.g. `projections_re` or
-#' `projections_fe` after `combine_delta()`), binds it onto `prediction_grid`,
+#' Takes a matrix of log-density draws (e.g. `projections_re` or
+#' `projections_fe` after `return_density()`), binds it onto `prediction_grid`,
 #' and pivots to one row per cell x year x draw -- the shared shape every
 #' shift-indicator function downstream (`summarise_sim_trend()`,
 #' `get_range_edge_sim()`, etc.) expects. Lets different `project()` scenarios
@@ -206,15 +315,16 @@ get_range_edge_sim <- function(df, rank_var, quantiles, by) {
 #'
 #' @param prediction_grid The `newdata` grid passed to `project()` -- one row
 #'   per cell x region x year, must contain `year`, `area`, and `region`.
-#' @param projections Matrix of link-space draws with rows matching
-#'   `prediction_grid` and one column per draw (`project()`'s `nsim`).
+#' @param projections Matrix of log-density draws (e.g. `return_density()`
+#'   output) with rows matching `prediction_grid` and one column per draw
+#'   (`project()`'s `nsim`).
 #' @param last_historical_year Last year with survey data; splits
 #'   `time_period` into `"historical"`/`"forecast"`.
 #'
-#' @note Only safe to log `projections` because these are expected-density
-#'   draws (`observation_error = FALSE`): `plogis(eta1) * exp(eta2)`, which is
-#'   strictly positive. No observation-level noise is added, so this is not
-#'   the same object `simulate(..., observation_error = TRUE)` would give you.
+#' @note `projections` should come from expected-density draws
+#'   (`observation_error = FALSE`, the `project()` default) -- no
+#'   observation-level noise is added, so this is not the same object
+#'   `simulate(..., observation_error = TRUE)` would give you.
 #'
 #'   What varies across `draw` depends entirely on the `project()` call that
 #'   produced `projections`, not on this function:
