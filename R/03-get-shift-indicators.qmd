@@ -540,12 +540,16 @@ cog_segments_sf <- cog_sf |>
 
 prediction_background <- pred_cell_sf |>
   select(-region) |>
-  filter(year == last_historical_year | year == 2060)
+  filter(year == last_historical_year | year == 2035)
 
-ggplot() +
+cog_plot <- ggplot() +
   geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
   geom_sf(data = prediction_background, aes(fill = density_km2), alpha = 0.4, colour = NA) +
-  scale_fill_viridis_c(trans = "log10") +
+  scale_fill_viridis_c(
+    trans = ggsidekick::fourth_root_power_trans(),
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+    guide = guide_colorbar(title.position = "top", barwidth = unit(3.5, "cm"), barheight = unit(0.3, "cm"))
+  ) +
   geom_sf(data = cog_segments_sf, aes(colour = year), linewidth = 0.8,
         arrow = grid::arrow(length = unit(0.18, "cm"), type = "closed")) +
   # geom_sf(data = cog_sf |> slice_max(year), aes(colour = year), size = 3) +
@@ -554,8 +558,35 @@ ggplot() +
   labs(colour = "Year", title = "Centre of gravity trajectory, Pacific Spiny Dogfish (WCVI)") +
   gfplot::coord_sf_auto(pred_cell_sf) +
   facet_grid(region ~ time_period)
-dir.create("figs")
-ggsave("figs/cog-dogfish-eg.png", width = 7, height = 4)
+
+cog_plot +
+  theme(
+    legend.position = "top",
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(2, "pt"),
+    legend.spacing.x = unit(4, "pt")
+  ) +
+   scale_colour_viridis_c(
+    option = "magma", end = 0.7,
+    breaks = scales::breaks_pretty(n = 4),
+     guide = guide_colorbar(barwidth = unit(3.5, "cm"), barheight = unit(0.25, "cm"))
+  ) +
+    scale_fill_viridis_c(
+    trans = ggsidekick::fourth_root_power_trans(),
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+    guide = "none") +
+    labs(colour = "Year") +
+    theme(axis.text = element_blank(),
+       strip.text.y = element_blank(),
+       plot.title = element_blank()
+    )
+
+fig_dir <- here::here('presentations', 'figs')
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+ggsave(file.path(fig_dir, "cog-dogfish-eg.png"),
+  width = 6.5, height = 3.75
+  )
 
 ggplot() +
   geom_sf(data = pacea::bc_coast, fill = "grey90", linewidth = 0.2) +
