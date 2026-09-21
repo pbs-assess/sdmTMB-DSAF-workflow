@@ -34,14 +34,28 @@ source(here::here("R", "00-settings.R"))
 * Visual check: map dogfish observations and temperature patterns by year for the full survey and for one region (WCVI)
 
 ```{r}
+species <- "dogfish"
+# species <- "pacific-cod" # requires stored dataset
+
 # Prepare dogfish data, including temperature
-dog0 <- dogfish # from sdmTMB package
-dog <- dog0 |> mutate(log_depth = log(depth))
+dat0 <- sdmTMB::dogfish # from sdmTMB package
+
+# dat0 <- readRDS(here::here("../../gfsynopsis-2025-data/report/data-cache-2026-07/survey-sets/pacific-cod.rds")) |>
+#   mutate( # bleh - gfsynopsis cached data drops the area_swept_km2 from get_all_survey_sets()
+#       area_swept1 = doorspread_m * (speed_mpm * duration_min),
+#       area_swept2 = tow_length_m * doorspread_m,
+#       area_swept = ifelse(is.na(area_swept2), area_swept1, area_swept2)
+#   ) |>
+#   select(catch_weight, year, latitude, longitude, survey_abbrev, depth = depth_m, area_swept) |>
+#   filter(survey_abbrev == "SYN WCVI") |>
+#   sdmTMB::add_utm_columns()
+
+dat <- dat0 |> mutate(log_depth = log(depth))
 
 # `temp_dat0` holds columns for 2002-2099 across climate scenarios (only 1 right now)
 # Choose years to extract temp data in
 # covariate_years <- min(dog$year):max(dog$year) # historical only
-covariate_years <- min(dog$year):2060 # Let's just do some forecasting to 2060 for now, could go to 2099
+covariate_years <- min(dat$year):2060 # Let's just do some forecasting to 2060 for now, could go to 2099
 
 # Trond dataset - processed by Sean:
 # - extracted data for 2002-2099 for one climate scenario for one month (june) and the 50th percentile value only, that works out to a ~70 mb .tif file
@@ -59,25 +73,25 @@ temp_stack <- terra::rast(lapply(value_cols, \(v) {
 }))
 names(temp_stack) <- covariate_years
 
-dog_vect <- terra::vect(dog, geom = c("longitude", "latitude"), crs = "EPSG:4326") |>
+dat_vect <- terra::vect(dat, geom = c("longitude", "latitude"), crs = "EPSG:4326") |>
   terra::project(terra::crs(temp_stack))
 
-dog$bottom_temp <- terra::extract(
+dat$bottom_temp <- terra::extract(
   temp_stack,
-  dog_vect,
+  dat_vect,
   method = "bilinear",
-  layer = as.character(dog$year)
+  layer = as.character(dat$year)
 )$value
 
-glimpse(dog)
+glimpse(dat)
 
-dog_sf <- dog |> sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+dat_sf <- dat |> sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
 ```
 
 ```{r}
 #| label: wcvi-survey-set-bottom-temp
 
-ggplot(dog_sf) +
+ggplot(dat_sf) +
   geom_sf(data = pacea::bc_coast) +
   geom_sf(aes(colour = bottom_temp)) +
   viridis::scale_colour_viridis(option = "plasma") +
@@ -96,7 +110,7 @@ ggplot(dog_sf) +
       direction = "horizontal"
     )
   ) +
-  gfplot::coord_sf_auto(dog_sf, buffer = 10000)
+  gfplot::coord_sf_auto(dat_sf, buffer = 10000)
 ```
 
 ```{r}
@@ -154,7 +168,7 @@ ggplot() +
       direction = "horizontal"
     )
   ) +
-  gfplot::coord_sf_auto(dog_sf, buffer = 10000) # zoom into WCVI
+  gfplot::coord_sf_auto(dat_sf, buffer = 10000) # zoom into WCVI
 ```
 
 ### Split WCVI into two example regions
@@ -213,7 +227,7 @@ prediction_grid <- wcvi_cell_region_polys |>
 wcvi_cell_region_polys |>
   select(cell, region, geometry) |>
   left_join(
-    prediction_grid |> filter(year == max(dog$year) + 1),
+    prediction_grid |> filter(year == max(dat$year) + 1),
     by = c("cell", "region")
   ) |>
   ggplot() +
@@ -228,10 +242,10 @@ unique(prediction_grid$year)
 
 ```{r}
 out_filename <- "dogfish.rds" # likely replace with species name from raw data
-
+out_filename <- paste0(species, ".rds")
 # Objects saved
 # - cleaned survey data
-saveRDS(dog, file = file.path(model_input_dir, out_filename))
+saveRDS(dat, file = file.path(model_input_dir, out_filename))
 
 # - minimize object sizes: rasterized cell polygons (keyed by `cell`/`region`)
 # - join downstream for plotting / sf uses
