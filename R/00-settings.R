@@ -18,7 +18,8 @@ dir.create(fit_dir, showWarnings = FALSE)
 
 ggplot2::theme_set(gfplot::theme_pbs())
 
-blues <- bayesplot::color_scheme_get("blue")
+# use bayesplot blues
+blues <- c("lightest" = "#d1e1ec", "light" = "#b3cde0", "mid" = "#6497b1", "#005b96", "dark" = "#03396c", "darkest" = "#011f4b")
 
 # @Check: this is the wording to use?
 pvalue_labels <- dplyr::tribble(
