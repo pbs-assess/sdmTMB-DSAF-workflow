@@ -5,7 +5,7 @@ library(ggsidekick)
 library(sdmTMB)
 
 source('R/00-settings.R')
-source('R/functions.R')
+source(here::here("R", "functions.R"))
 
 fit <- readRDS(file.path(fit_dir, paste0("dogfish-dgg", ".rds")))
 
@@ -14,6 +14,8 @@ cell_polygons0 <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
 missing_cells <- anti_join(cell_polygons0, prediction_grid0)
 cell_polygons <- cell_polygons0 |> filter(!(cell %in% missing_cells$cell))
+
+prediction_grid <- prediction_grid0 |> filter(year <= 2040)
 
 pgrid <- prediction_grid0 |> filter(year %in% c(2005, 2022, 2042))
 pgrid_2022 <- prediction_grid0 |> filter(year == 2022) |> tidyr::drop_na(bottom_temp)
@@ -24,7 +26,7 @@ region_polys_path <- file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-regio
 region_polys <- sf::st_read(region_polys_path, quiet = TRUE)
 
 dog <- sdmTMB::dogfish
-dog_sf <- XY_to_sf(dog)
+dog_sf <- gfplot::XY_to_sf(dog)
 
 coast <- pacea::bc_coast
 
@@ -48,20 +50,53 @@ bmap <- ggplot() +
   guides(colour = "none", size = "none", fill = "none")
 
 # ------------------------------------------------------------------------------
-sims_re <- readRDS(file.path(model_out_dir, "sims_re.rds"))
+# sim_draws objects cached by R/03-get-shift-indicators-matrix.R
+model_name <- "dogfish-dgg-rw"
+# model_name <- "dogfish-dgg-ar1"
+fit_path <- file.path(fit_dir, paste0(model_name, ".rds"))
+fit <- readRDS(fit_path)
+remind_model_info(fit)
 
-sim1 <- sims_re |> filter(sim == 1)
-sim1_2035_sf <- left_join(cell_polygons, sim1) |>
+last_historical_year <- max(fit$data$year) # use for centring lm trend intercept
+
+set.seed(2026) # @Question - should we have set seed in project.sdmTMB?
+proj <- project(
+  fit,
+  newdata = prediction_grid,
+  nsim = 400,
+  sample_fe = FALSE,
+  sample_historical_re = TRUE,
+  sample_future_re = TRUE,
+  offset = rep(0, nrow(prediction_grid))
+)
+
+proj_mat <- return_density(proj, fit, log = TRUE)
+sims_re <- make_sim_draws(prediction_grid, proj_mat, last_historical_year,
+  type = "re", model_name = model_name)
+
+# Map slices from sims_re: the per-cell median across draws for 2022 (closest
+# analogue to a point prediction; the median of exp() equals exp() of the
+# median) and a single draw for 2035. distinct() because cells split across
+# regions carry identical log_density in each half.
+map_years <- c(2022, 2035)
+rows_map <- which(sims_re$grid$year %in% map_years)
+slices <- sim_draw_slices(
+  sims_re$grid[rows_map, ],
+  sims_re$log_density[rows_map, , drop = FALSE],
+  sims = 1, agg = list(median = matrixStats::rowMedians), value_name = "log_density"
+) |>
+  distinct(cell, year, draw, log_density)
+
+pred_2022_sf <- cell_polygons |>
+  left_join(filter(slices, year == 2022, draw == "median"), by = "cell") |>
+  tidyr::drop_na(log_density)
+sim1_2035_sf <- cell_polygons |>
+  left_join(filter(slices, year == 2035, draw == "sim_1"), by = "cell") |>
   tidyr::drop_na(log_density)
 
 # prediction map
-pred_2022 <- predict(fit, newdata = pgrid_2022, type = "link", nsim = 0, model = NA) |>
-  mutate(est = fit$family[[1]]$linkinv(est1) * fit$family[[2]]$linkinv(est2))
-pred_2022_sf <- left_join(cell_polygons, pred_2022) |>
-  tidyr::drop_na(est)
-
 dgg_pred_2022 <- bmap +
-  geom_sf(data = pred_2022_sf, aes(fill = est)) +
+  geom_sf(data = pred_2022_sf, aes(fill = exp(log_density))) +
   scale_fill_viridis_c(trans = "fourth_root_power") +
   gfplot::coord_sf_auto(pred_2022_sf, buffer = -100000)
 dgg_pred_2022
@@ -84,67 +119,18 @@ pred_tw <- predict(fit_tw, newdata = pgrid_2022, type = "link", nsim = 0, model 
 pred_tw_sf <- left_join(cell_polygons, pred_tw)
 
 tw_omega_s <- bmap +
-  geom_sf(data = pgrid_outline, linewidth = 0.8) +
+  geom_sf(data = pgrid_outline, linewidth = 0.8, colour = "grey80") +
   geom_sf(data = pred_tw_sf, aes(fill = omega_s, colour = omega_s)) +
   scale_colour_gradient2() +
   scale_fill_gradient2() +
   gfplot::coord_sf_auto(pred_2022_sf, buffer = -100000)
 
 tw_epsilon_st <- bmap +
-  geom_sf(data = pgrid_outline, linewidth = 0.8) +
+  geom_sf(data = pgrid_outline, linewidth = 0.8, colour = "grey80") +
   geom_sf(data = pred_tw_sf, aes(fill = epsilon_st, colour = epsilon_st)) +
   scale_colour_gradient2() +
   scale_fill_gradient2() +
   gfplot::coord_sf_auto(pred_2022_sf, buffer = -100000)
-
-
-# ------------------------------------------------------------------------------
-# Get plots for index using project
-prediction_grid <- prediction_grid0 |> filter(year <= 2035)
-
-fit_rw <- readRDS(file.path(fit_dir, "dogfish-dgg-rw.rds"))
-remind_model_info(fit_rw)
-
-fit_rw$spatiotemporal
-
-sims_re <- readRDS
-
-
-sims_fe <- make_sims_df(prediction_grid, projections_fe, last_historical_year) |>
-  mutate(type = "fe")
-
-a_by_sim <- sims |>
-  group_by(time_period, region, year, sim) |>
-  summarise(total_abundance = sum(exp(log_abundance)), .groups = "drop")
-
-a_by_region <- a_by_sim |>
-  summarise_sim_ci(cols = total_abundance, by = c(time_period, region, year))
-
-a_by_region |>
-  filter(region == "all") |>
-ggplot() +
-  aes(x = year, y = est, ymin = lwr, ymax = upr, colour = region, fill = region) +
-  geom_line() +
-  geom_ribbon(colour = NA, alpha = 0.3) +
-  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey30") +
-  coord_cartesian(expand = FALSE)
-
-a_by_sim |>
-  filter(region == "all") |>
-ggplot() +
-  aes(x = year, y = log(total_abundance), colour = region, fill = region, group = interaction(sim, region)) +
-geom_ribbon(data = a_by_region |> filter(region == "all"),
-  aes(y = log(est), ymin = log(lwr), ymax = log(upr), group = NULL),
-  fill = blues[[1]], colour = NA, alpha = 0.7) +
-  # geom_line(colour = blues[[4]], alpha = 0.3) +
-  geom_line(data = a_by_region |> filter(region == "all"),
-    aes(y = log(est), group = NULL),
-    colour = blues[[5]], linewidth = 1) +
-  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey30") +
-  coord_cartesian(expand = FALSE, clip = "on") +
-  facet_wrap(~ region, ncol = 1) +
-  ggtitle(unique(sims$type))
-
 
 # ------------------------------------------------------------------------------
 # save plots

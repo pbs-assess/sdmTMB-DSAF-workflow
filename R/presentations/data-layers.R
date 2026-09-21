@@ -7,8 +7,8 @@ source('R/00-settings.R')
 prediction_grid0 <- readRDS(file.path(model_input_dir, "prediction-grid.rds"))
 cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
-dog <- sdmTMB::dogfish
-dog_sf <- XY_to_sf(dog)
+dog <- readRDS(file.path(model_input_dir, "dogfish.rds"))
+dog_sf <- gfplot::XY_to_sf(dog)
 
 bt0 <- pacea::bccm_bottom_temperature()
 bt <-  bt0 |> select(matches("_6$")) |>
@@ -55,8 +55,9 @@ bmap <- ggplot() +
   ) +
   guides(colour = "none", size = "none", fill = "none")
 
+# Point data
 # Catch locations
-catch_map <- bmap +
+catch_map_point <- bmap +
   geom_sf(
     data = dog_sf |> filter(year == 2022),
     aes(size = catch_weight),
@@ -65,8 +66,31 @@ catch_map <- bmap +
   ) +
   scale_size_area(trans = "sqrt", max_size = 7, breaks = scales::pretty_breaks(n = 3)) +
   gfplot::coord_sf_auto(pgrid_sf, buffer = -10000)
-catch_map
+catch_map_point
 
+depth_map_point <- bmap +
+  geom_sf(
+    data = dog_sf |> filter(year == 2022),
+    aes(fill = depth),
+    size = 1.2, stroke = 0.1,
+    shape = 21, colour = "grey70"
+  ) +
+  scale_fill_gradientn(colours = depth_pal, breaks = brk_rank, labels = brk_m, name = "Depth (m)") +
+  gfplot::coord_sf_auto(pgrid_sf, buffer = -10000)
+depth_map_point
+
+temp_map_point <- bmap +
+  geom_sf(
+    data = dog_sf |> filter(year == 2022),
+    aes(colour = bottom_temp),
+    size = 1.2
+  ) +
+  scale_colour_gradientn(colours = temp_pal, limits = c(1.9, 11), oob = scales::squish,
+                          breaks = scales::pretty_breaks(6), name = "Bottom temp (°C)") +
+  gfplot::coord_sf_auto(pgrid_sf, buffer = -10000)
+temp_map_point
+
+# Gridded data
 catch_map_grid <- catch_map +
   geom_sf(data = pgrid_2022, fill = NA, colour = "grey30", linewidth = 0.08) +
   geom_sf(data = pgrid_outline, fill = NA, colour = "grey30", linewidth = 0.2) +
@@ -118,11 +142,11 @@ save_panel <- function(plot, name) {
          width = panel_width, height = panel_height, dpi = 300, bg = "white")
 }
 
-save_panel(catch_map, "catch-map")
+save_panel(catch_map_point, "catch-map-point")
 save_panel(catch_map_grid, "catch-map-grid")
-save_panel(depth_map, "depth-map")
+save_panel(depth_map_point, "depth-map-point")
 save_panel(depth_map_grid, "depth-map-grid")
-save_panel(temp_map, "temp-map")
+save_panel(temp_map_point, "temp-map-point")
 save_panel(temp_map_grid, "temp-map-grid")
 
 # ------------------------------------------------------------------------------
@@ -159,11 +183,11 @@ thumb_ylim <- thumb_bbox$ylim
 thumb_width <- map_scale * diff(thumb_xlim)
 thumb_height <- map_scale * diff(thumb_ylim)
 
-catch_map_thumb <- catch_map +
+catch_map_thumb <- catch_map_point +
   gfplot::coord_sf_auto(pgrid_sf, buffer = -10000, xlim = thumb_xlim, ylim = thumb_ylim)
-depth_map_thumb <- depth_map +
+depth_map_thumb <- depth_map_point +
   gfplot::coord_sf_auto(pgrid_sf, buffer = -10000, xlim = thumb_xlim, ylim = thumb_ylim)
-temp_map_thumb <- temp_map +
+temp_map_thumb <- temp_map_point +
   gfplot::coord_sf_auto(pgrid_sf, buffer = -10000, xlim = thumb_xlim, ylim = thumb_ylim)
 
 save_thumb <- function(plot, name) {
@@ -188,7 +212,7 @@ dog_fit_data <- readRDS(file.path(model_input_dir, "dogfish.rds"))
 dog_fit_data$est <- predict(fit)$est2
 
 depth_nonlinear_thumb <- ggplot(dog_fit_data, aes(depth, est)) +
-  geom_point(alpha = 0.3, size = 0.8) +
+  geom_point(alpha = 0.3, size = 1.2, stroke = 0) +
   geom_smooth(colour = "#1b6ec2", se = FALSE, linewidth = 1.2) +
   theme(
     axis.title = element_blank(),
