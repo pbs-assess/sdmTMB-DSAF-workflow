@@ -1,12 +1,11 @@
-# Verify the matrix-native shift-indicator engine (R/functions2.R) against
-# the long-format pipeline currently in R/03-get-shift-indicators.qmd
-# (R/functions.R). See ~/.claude/plans/we-have-implemented-the-parallel-orbit.md.
+# Verify the matrix-native shift-indicator engine (R/functions.R) against
+# the original long-format pipeline (R/functions-legacy.R).
 #
 # Both paths start from the same `project()` draws and are compared with
 # waldo::compare() -- correctness, not speed, is the point of this script
 # (nsim kept small on purpose; bump it separately for a timing check).
 #
-# Covers both the per-sim indicator draws (functions2.R's sim_stat engine)
+# Covers both the per-sim indicator draws (functions.R's sim_stat engine)
 # AND the uncertainty summaries built on top of them (summarise_estimates(),
 # summarise_trend()) -- the two things the matrix-native refactor was
 # meant to preserve while making fast.
@@ -16,12 +15,11 @@ library(sdmTMB)
 
 source(here::here("R", "00-settings.R"))
 source(here::here("R", "functions.R"))
-# functions2.R no longer reuses these names, so aliasing is only for
-# readability (matches this script's `_old`/`_new` naming throughout).
+source(here::here("R", "functions-legacy.R"))
+# aliased only for readability (matches this script's `_old`/`_new` naming)
 get_range_edge_sim_old <- get_range_edge_sim
 summarise_sim_ci_old <- summarise_sim_ci
 summarise_sim_trend_old <- summarise_sim_trend
-source(here::here("R", "functions2.R"))
 
 model_name <- "dogfish-dgg-rw"
 fit_path <- file.path(fit_dir, paste0(model_name, ".rds"))
@@ -44,7 +42,7 @@ projections <- project(
   offset = rep(0, nrow(prediction_grid))
 )
 
-# ---- OLD path (functions.R: make_sims_df + long-format group_by/summarise) ----
+# ---- OLD path (functions-legacy.R: make_sims_df + long-format group_by/summarise) ----
 
 time_old <- system.time({
 log_density <- return_density(projections, fit, log = TRUE)
@@ -116,7 +114,7 @@ range_edge_EW_by_sim_old <- sims_old |>
   )
 }) # time_old
 
-# ---- NEW path (functions2.R: make_sim_draws + matrix-native engine) ----
+# ---- NEW path (functions.R: make_sim_draws + matrix-native engine) ----
 
 time_new <- system.time({
 log_density <- return_density(projections, fit, log = TRUE)

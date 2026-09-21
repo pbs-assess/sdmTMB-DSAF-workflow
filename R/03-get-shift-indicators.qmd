@@ -36,7 +36,7 @@ fit_path <- file.path(fit_dir, paste0(model_name, ".rds"))
 fit <- readRDS(fit_path)
 remind_model_info(fit)
 
-prediction_grid0 <- readRDS(file.path(model_input_dir, "prediction-grid.rds")) |>
+prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds")) |>
   filter(year <= 2040)
 cell_polygons <- readRDS(file.path(model_input_dir, "wcvi-cell-polygons.rds"))
 
@@ -69,7 +69,7 @@ that instead, projections are done here using `project()`. This could be adjuste
 
 ```{r}
 #| results: markup
-head(prediction_grid0)
+head(prediction_grid)
 ```
 
 One row per `cell` x `region` x `year`. This is the `newdata` passed to
@@ -175,28 +175,26 @@ last_historical_year <- max(fit$data$year) # use for centring so no ambiguity in
 
 ```
 
-Generate simulated draws; right now separately done using `simulate()` for the
-historical data and `project()` for forecasts. No observation error included.
+Generate simulated draws with `project()`, which covers both the historical and
+forecast years in one call. No observation error included. The draws are kept
+as a `sim_draws` object: the prediction grid plus a cells x sims log-density
+matrix (one row per grid row), so the indicators below work on the matrix
+directly rather than a long one-row-per-cell-per-sim table.
 
 ```{r sim-draws}
-#| cache: true
-#| cache.extra: !expr tools::md5sum(c(fit_path, file.path(model_input_dir, "prediction-grid.rds")))
 # @Note: only safe to log if `observation_error = FALSE` because `simulate() returns the expected density plogis(η₁)·exp(η₂), which is strictly positive (plogis output cannot be 0). Zeros only come from the presence/absence draw when `observation_error = TRUE`.
 
-sims_re_path <- file.path(model_out_dir, paste0("sims_re-", model_name, ".rds"))
-sims_fe_path <- file.path(model_out_dir, paste0("sims_fe-", model_name, ".rds"))
+sims_re_path <- file.path(model_out_dir, paste0("sims_re-", model_name, "-matrix.qs2"))
+sims_fe_path <- file.path(model_out_dir, paste0("sims_fe-", model_name, "-matrix.qs2"))
 
 if (file.exists(sims_re_path)) {
-  sims_re <- readRDS(sims_re_path)
+  sims_re <- qs2::qs_read(sims_re_path)
 } else {
-  set.seed(2026)
-
-  prediction_grid <- prediction_grid0 |> filter(year <= 2035)
-
+  set.seed(2026) # @Question - should we have set seed in project.sdmTMB?
   projections <- project(
     fit,
     newdata = prediction_grid,
-    nsim = 50,
+    nsim = 400,
     sample_fe = FALSE,
     sample_historical_re = TRUE,
     sample_future_re = TRUE,
@@ -204,48 +202,39 @@ if (file.exists(sims_re_path)) {
   )
   meep()
 
-  projection_log_density <- return_density(projections, fit, log = TRUE)
-
-  sims_re <- make_sims_df(
-      prediction_grid,
-      projection_log_density,
-      last_historical_year
-    ) |>
-      mutate(type = "re", model_name = model_name)
-
-  saveRDS(sims_re, sims_re_path)
-}
-
-if (file.exists(sims_fe_path)) {
-  sims_fe <- readRDS(sims_fe_path)
-} else {
-  set.seed(2026)
-
-  prediction_grid <- prediction_grid0 |> filter(year <= 2035)
-
-  projections_fe <- project(
-    fit,
-    newdata = prediction_grid,
-    nsim = 50,
-    sample_fe = FALSE,
-    sample_historical_re = TRUE,
-    sample_future_re = TRUE,
-    future_re = "fix",
-    offset = rep(0, nrow(prediction_grid))
+  sims_re <- make_sim_draws(
+    prediction_grid,
+    return_density(projections, fit, log = TRUE),
+    last_historical_year,
+    type = "re", model_name = model_name
   )
-  meep()
-
-  projection_fe_log_density <- projections_fe$est1 + projections_fe$est2
-
-  sims_fe <- make_sims_df(
-      prediction_grid,
-      projection_fe_log_density,
-      last_historical_year
-    ) |>
-      mutate(type = "fe", model_name = model_name)
-
-  saveRDS(sims_fe, sims_fe_path)
+  qs2::qs_save(sims_re, sims_re_path)
 }
+
+# if (file.exists(sims_fe_path)) {
+#   sims_fe <- qs2::qs_read(sims_fe_path)
+# } else {
+#   set.seed(2026)
+#   projections_fe <- project(
+#     fit,
+#     newdata = prediction_grid,
+#     nsim = 400,
+#     sample_fe = FALSE,
+#     sample_historical_re = TRUE,
+#     sample_future_re = TRUE,
+#     future_re = "fix",
+#     offset = rep(0, nrow(prediction_grid))
+#   )
+#   meep()
+#
+#   sims_fe <- make_sim_draws(
+#     prediction_grid,
+#     return_density(projections_fe, fit, log = TRUE),
+#     last_historical_year,
+#     type = "fe", model_name = model_name
+#   )
+#   qs2::qs_save(sims_fe, sims_fe_path)
+# }
 
 # projections_re <- project(
 #   fit,
@@ -272,18 +261,27 @@ sims <- sims_re
 ```
 
 Visualise the species distributions for the historical and full series.
+```{r pred-cell}
+# Per-cell draws pulled from the matrix only for mapping; the indicators below
+# never melt the full cells x sims matrix
+pred_cell <- sim_draw_slices(
+  sims$grid, sims$log_density,
+  sims = 3,
+  agg = list(median = matrixStats::rowMedians),
+  value_name = "log_density"
+) |>
+  select(time_period, year, cell, region, draw, log_density)
+```
+
 ```{r pred-map-historical}
 #| fig-width: 8
 #| fig-height: 13
 
 # Predicted values plot
 # @TODO - add bathymetric layer
-sims |>
-  filter(time_period == "historical") |>
-  group_by(time_period, year, cell, region) |>
-  filter(sim == 3) |>
+pred_cell |>
+  filter(time_period == "historical", draw == "sim_3") |>
   filter(year %in% seq(2004, 2022,  by = 4)) |>
-  summarise(log_density = median(log_density)) |>
   left_join(cell_polygons, y = _) |>
   tidyr::drop_na(log_density) |>
 ggplot() +
@@ -301,13 +299,9 @@ ggplot() +
 #| fig-width: 9
 #| fig-height: 13
 
-sims |>
-  # filter(time_period == "forecast") |>
-  # filter(year %in% seq(last_historical_year + 1, 2060, by = 2)) |>
+pred_cell |>
+  filter(draw == "median") |>
   filter(year %in% seq(2005, 2060,  by = 4)) |>
-  # filter(sim == 3) |>
-  group_by(time_period, year, cell, region) |>
-  summarise(log_density = median(log_density)) |>
   left_join(cell_polygons, y = _) |>
   tidyr::drop_na(log_density) |>
 ggplot() +
@@ -323,9 +317,10 @@ ggplot() +
 
 ```{r pred-cell-sf}
 # For plotting background - make predictions into sf object
-pred_cell_sf <- sims |>
-  group_by(time_period, year, cell, region) |>
-  summarise(density_km2 = exp(median(log_density)), log_density = median(log_density), .groups = "drop") |>
+pred_cell_sf <- pred_cell |>
+  filter(draw == "median") |>
+  transmute(time_period, year, cell, region,
+            density_km2 = exp(log_density), log_density) |>
   left_join(cell_polygons, y = _) |>
   tidyr::drop_na(density_km2)
 ```
@@ -355,23 +350,16 @@ total weight of individuals
 # @Question: should we be summarising by mean to match E(X) with bias correction?
 # Or median? Or doesn't matter since we're only looking at trends?
 
-# for my reference
-# get_index_sims does:
-  # est_function = stats::median()
-  # area_function = function(x, area) x + log(area)
-  # agg_function = function(x) sum(exp(x)) - because values must come logged
+abund_region  <- abundance_by_group(sims, by_region = TRUE)
+abund_all_raw <- abundance_by_group(sims, by_region = FALSE)
+abund_stat    <- sim_stat_bind(abund_region, abund_all_raw)
 
-# Calculate annual abundance for each simulated draw
-a_by_sim <- sims |>
-  group_by(time_period, region, year, sim) |>
-  summarise(total_abundance = sum(exp(log_abundance)), .groups = "drop")
+a_by_region <- summarise_estimates(abund_stat)
 
-a_by_region <- a_by_sim |>
-  summarise_sim_ci(cols = total_abundance, by = c(time_period, region, year))
-
-abund_lm_by_sim <- a_by_sim |>
-  mutate(centred_year = year - last_historical_year) |>
-  summarise_sim_trend(value = log(total_abundance), by = c(time_period, region))
+abund_trend_stat <- abund_stat
+abund_trend_stat$mats$total_abundance <- log(abund_trend_stat$mats$total_abundance)
+abund_lm_by_sim <- summarise_trend(abund_trend_stat, by = c("time_period", "region"),
+                                   centre_year = last_historical_year)
 
 abundance_summary <- abund_lm_by_sim |>
   filter(term == "centred_year") |>
@@ -385,34 +373,21 @@ abundance_summary <- abund_lm_by_sim |>
     lwr = lwr,
     upr = upr,
     prob_direction,
-    units = "log(biomass) / year" # @TODO: generalise the units
+    units = "biomass (kg) / year" # @TODO: generalise the units
   )
 
-a_by_region |>
-  filter(region != "all") |>
+ld_all <- log_density_by_group(sims, by_region = FALSE) |>
+  summarise_estimates(est_function = mean, probs = c(0.1, 0.9))
+
+ld_all |>
 ggplot() +
   aes(x = year, y = est, ymin = lwr, ymax = upr, colour = region, fill = region) +
   geom_line() +
   geom_ribbon(colour = NA, alpha = 0.3) +
   geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey30") +
+  scale_colour_manual(values = blues[["darkest"]]) +
+  scale_fill_manual(values = blues[["mid"]]) +
   coord_cartesian(expand = FALSE)
-
-a_by_sim |>
-  filter(region == "all") |>
-ggplot() +
-  aes(x = year, y = log(total_abundance), colour = region, fill = region, group = interaction(sim, region)) +
-geom_ribbon(data = a_by_region |> filter(region == "all"),
-  aes(y = log(est), ymin = log(lwr), ymax = log(upr), group = NULL),
-  fill = blues[[1]], colour = NA, alpha = 0.7) +
-  geom_line(colour = blues[[4]], alpha = 0.3) +
-  geom_line(data = a_by_region |> filter(region == "all"),
-    aes(y = log(est), group = NULL),
-    colour = blues[[5]], linewidth = 1) +
-  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey30") +
-  coord_cartesian(expand = FALSE, clip = "on") +
-  facet_wrap(~ region, ncol = 1) +
-  ggtitle(unique(sims$type))
-
 
 ```
 
@@ -424,21 +399,22 @@ Indicates changes in the relative contribution of a region to the overall abunda
 ```{r proportional-abundance}
 # @Question: best way to propagate uncertainty, since this is a ratio of two estimates? using nsim from same seed comparison does this?
 # - should we be getting the ratio from the nsim values?
-totals_by_sim <- a_by_sim |>
-  filter(region == "all") |>
-  select(time_period, year, sim, total_abundance_all = total_abundance)
+# Match each region row to its time_period x year "all" total so the ratio is taken draw-by-draw
+idx_all <- match(
+  interaction(abund_region$key$time_period, abund_region$key$year, drop = TRUE),
+  interaction(abund_all_raw$key$time_period, abund_all_raw$key$year, drop = TRUE)
+)
+prop_stat <- sim_stat(
+  abund_region$key,
+  list(prop = abund_region$mats$total_abundance / abund_all_raw$mats$total_abundance[idx_all, , drop = FALSE])
+)
 
-p_abund_by_sim <- a_by_sim |>
-  filter(region != "all") |>
-  left_join(totals_by_sim, by = c("time_period", "year", "sim")) |>
-  mutate(prop = total_abundance / total_abundance_all)
+p_abund <- summarise_estimates(prop_stat)
 
-p_abund <- p_abund_by_sim |>
-  summarise_sim_ci(cols = prop, by = c(time_period, region, year))
-
-p_abund_lm <- p_abund_by_sim |>
-  mutate(centred_year = year - last_historical_year) |>
-  summarise_sim_trend(value = qlogis(prop), by = c(time_period, region))
+prop_trend_stat <- prop_stat
+prop_trend_stat$mats$prop <- qlogis(prop_trend_stat$mats$prop)
+p_abund_lm <- summarise_trend(prop_trend_stat, by = c("time_period", "region"),
+                              centre_year = last_historical_year)
 
 prop_abundance_summary <- p_abund_lm |>
   filter(term == "centred_year") |>
@@ -466,9 +442,7 @@ ggplot(data = p_abund) +
   ggthemes::scale_colour_ptol() +
   ggthemes::scale_fill_ptol() +
   coord_cartesian(expand = FALSE) +
-  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey50") #+
-  # facet_wrap(time_period ~ ., ncol = 1, scales = "free_x")
-
+  geom_vline(xintercept = last_historical_year, linetype = "dashed", colour = "grey50")
 ```
 
 #### Centre of gravity
@@ -497,21 +471,18 @@ $$
 
 
 ```{r get-cog}
-cog_by_sim <- sims |>
-  group_by(time_period, region, year, sim) |>
-  summarise(
-    x = weighted.mean(X, w = exp(log_abundance)), # same as: x = sum(exp(log_abundance) * X) / sum(exp(log_abundance)),
-    y = weighted.mean(Y, w = exp(log_abundance)),
-    .groups = "drop"
-  )
+cog_stat <- sim_stat_bind(
+  abundance_by_group(sims, weighted_cols = c("X", "Y")),
+  abundance_by_group(sims, weighted_cols = c("X", "Y"), by_region = FALSE)
+)
+names(cog_stat$mats) <- c("total_abundance", "x", "y")
+cog_stat$mats$total_abundance <- NULL
 
-cog <- cog_by_sim |>
-  summarise_sim_ci(c(x, y), c(time_period, region, year))
+cog <- summarise_estimates(cog_stat)
 
-cog_lm <- cog_by_sim |>
-  mutate(centred_year = year - last_historical_year) |>
-  tidyr::pivot_longer(c(x, y), names_to = "coord", values_to = "cog") |>
-  summarise_sim_trend(value = cog, by = c(time_period, region, coord))
+cog_lm <- summarise_trend(cog_stat, by = c("time_period", "region"),
+                          centre_year = last_historical_year) |>
+  rename(coord = metric)
 
 cog_summary <- cog_lm |>
   filter(term == "centred_year") |>
@@ -527,7 +498,6 @@ cog_summary <- cog_lm |>
     prob_direction,
     units     = "km / year"
   )
-
 ```
 ```{r}
 #| fig-width: 7
@@ -550,7 +520,7 @@ make_cog_segments <- function(points_sf) {
 }
 
 cog_sf <- cog |>
-  XY_to_sf(coords = c("est_x", "est_y"), crs_to = st_crs(pred_cell_sf))
+  gfplot::XY_to_sf(coords = c("est_x", "est_y"), crs_to = st_crs(pred_cell_sf))
 
 cog_segments_sf <- cog_sf |>
   dplyr::group_split(region, time_period) |>
@@ -647,56 +617,17 @@ Three ways to display it on the shiny app plot:
 
 -[x] Area Efficiency
 
-```{r}
-ranked_accumulation_by_sims <- sims |> # @optimize: may need data.table here
-  group_by(time_period, region, year, sim) |>
-  # step 1 - rank by density within groups
-  arrange(desc(log_density), .by_group = TRUE) |>
-  # step 2 - cumulative abundance
-  mutate(
-    total_abundance = sum(exp(log_abundance)),
-    total_area = sum(area),
-    cumulative_abundance = cumsum(exp(log_abundance)),
-    percent_abundance = cumulative_abundance / total_abundance * 100,
-    cumulative_area = cumsum(area),
-    id = row_number()
-  ) # for plotting accumulation curves
-
-# Accumulation curves -----
-# ranked_accumulation_by_sims |>
-#   filter(sim %in% 1:10) |>
-#   filter(year %in% c(2004, last_historical_year, 2060)) |>
-# ggplot(aes(x = id, y = cumulative_abundance)) +
-#   geom_point(aes(colour = year)) +
-#   facet_wrap(~ region, scales = "free_x")
-
-# ranked_accumulation_by_sims |>
-#   filter(sim %in% 1:10) |>
-#   filter(year %in% c(2004, last_historical_year, 2060)) |>
-# ggplot(aes(x = id, y = cumulative_area)) +
-#   geom_point(aes(colour = year)) +
-#   facet_wrap(~ region, scales = "free_x")
-
-
-# Using approx instead for linear interpolation like is done for range edges rather than choosing a value before (as in Halibut paper) or after (as I was doing before) the threshold is crossed
+```{r area-occupied}
+# Linear interpolation (approx) at each threshold, like is done for range edges,
+# rather than choosing the cell before (as in Halibut paper) or after the threshold is crossed
 thresholds <- c(50, 75, 90, 95)
 
-quantile_eao_by_sim <- ranked_accumulation_by_sims |>
-  reframe(
-    threshold = thresholds,
-    area_threshold = approx(x = percent_abundance, y = cumulative_area,
-                                xout = thresholds, rule = 2, ties = "ordered")$y,
-    percent_area_used = area_threshold / dplyr::first(total_area),
-    area_efficiency    = area_threshold / dplyr::first(total_abundance)
-  ) |>
-  dplyr::select(time_period, region, year, sim, threshold, area_threshold, percent_area_used, area_efficiency)
+eao_stat <- sim_stat_bind(
+  get_area_occupied_sims(sims, thresholds, by_region = TRUE),
+  get_area_occupied_sims(sims, thresholds, by_region = FALSE)
+)
 
-
-quantile_eao <- quantile_eao_by_sim |>
-  summarise_sim_ci(
-    cols = c(area_threshold, percent_area_used, area_efficiency),
-    by = c(time_period, region, year, threshold)
-  )
+quantile_eao <- summarise_estimates(eao_stat)
 
 eao_metric_meta <- tibble::tribble(
   ~metric,             ~name,                  ~units,
@@ -705,17 +636,12 @@ eao_metric_meta <- tibble::tribble(
   "area_efficiency",    "Area efficiency",        "km^2^ / kg or count"
 )
 
-eao_lm <- quantile_eao_by_sim |>
-  # transform responses before lm fitting
-  mutate(
-    centred_year      = year - last_historical_year,
-    area_threshold    = area_threshold, # (units = km2)
-    percent_area_used = qlogis(percent_area_used), # (units = dimensionless)
-    area_efficiency   = area_efficiency # (units = km2 / biomass unit -- kg in dogfish example)
-  ) |>
-  tidyr::pivot_longer(c(area_threshold, percent_area_used, area_efficiency),
-                      names_to = "metric", values_to = "value") |>
-  summarise_sim_trend(value = value, by = c(time_period, region, metric, threshold)) |>
+# Only percent_area_used is logit-transformed before the trend fit;
+# area_threshold (km2) and area_efficiency (km2 / biomass unit) stay on their raw scale
+eao_lm_stat <- eao_stat
+eao_lm_stat$mats$percent_area_used <- qlogis(eao_lm_stat$mats$percent_area_used)
+eao_lm <- summarise_trend(eao_lm_stat, by = c("time_period", "region", "threshold"),
+                          centre_year = last_historical_year) |>
   left_join(eao_metric_meta, by = "metric")
 
 eao_summary <- eao_lm |>
@@ -735,30 +661,6 @@ transmute(
 
 # @Note to self - as a species becomes less patchy (less aggregated), area efficiency should increase because it takes more area to hold X% of the population; dividing the area threshold by abundance standardises this effect from total abundance (i.e., without it, as total abundance increases it obviously takes more area to hold the same amount of individuals)
 ```
-
-```{r compare-approx-vs-slice1}
-#| echo: false
-#| eval: false
-# step 3 - calculate values at abundance thresholds
-# thresholds <- c(50, 75, 90, 95)
-# quantile_eao_by_sim <- purrr::map(thresholds, \(t) {
-#   #@NOTE - right now this depends on maintaining the grouping of ranked_accumulation_by_sims, maybe we should code this in here/add a check here.
-#   ranked_accumulation_by_sims |>
-#     filter(percent_abundance >= t) |>
-#     slice(1) |> # first cell that crosses, per group; should we be interpolating like is done for range edge? use approx?
-#     mutate(
-#       threshold         = t,
-#       area_threshold    = cumulative_area,
-#       percent_area_used = area_threshold / total_area,
-#       area_efficiency   = area_threshold / total_abundance
-#     )
-# }) |>
-#   purrr::list_rbind() |>
-#   ungroup() |>
-#   select(time_period, region, year, sim, threshold,
-#          area_threshold, percent_area_used, area_efficiency)
-```
-
 
 ```{r plot-area-occupied}
 plot_area_metric <- function(df, colour_var, facet_var = NULL,
@@ -854,32 +756,17 @@ $$\frac{\sum_{i \le k} d_i A}{\sum_i d_i A}$$
 
 range_edge_quantiles <- c(trailing = 0.05, leading = 0.95)
 
-range_edge_NS_by_sim <- sims |>
-  filter(region == "all") |>
-  get_range_edge_sim(
-    rank_var = Y,
-    quantiles = range_edge_quantiles,
-    by = c(time_period, region, year, sim) # including region keeps the column even though we only use "all"
-  )
-range_edge_EW_by_sim <- sims |>
-  filter(region == "all") |>
-  get_range_edge_sim(
-    rank_var = X,
-    quantiles = range_edge_quantiles,
-    by = c(time_period, region, year, sim)
-  )
+# by_region = FALSE (default): full domain only, labelled region = "all"
+range_ns_stat <- get_range_edge_sims(sims, rank_var = Y, quantiles = range_edge_quantiles)
+range_ew_stat <- get_range_edge_sims(sims, rank_var = X, quantiles = range_edge_quantiles)
 
-range_edge_NS <- range_edge_NS_by_sim |>
-  summarise_sim_ci(Y_edge, c(time_period, region, year, edge))
-range_edge_EW <- range_edge_EW_by_sim |>
-  summarise_sim_ci(X_edge, c(time_period, region, year, edge))
+range_edge_NS <- summarise_estimates(range_ns_stat)
+range_edge_EW <- summarise_estimates(range_ew_stat)
 
-range_NS_lm <- range_edge_NS_by_sim |>
-  mutate(centred_year = year - last_historical_year) |>
-  summarise_sim_trend(value = Y_edge, by = c(time_period, region, edge))
-range_EW_lm <- range_edge_EW_by_sim |>
-  mutate(centred_year = year - last_historical_year) |>
-  summarise_sim_trend(value = X_edge, by = c(time_period, region, edge))
+range_NS_lm <- summarise_trend(range_ns_stat, by = c("time_period", "region", "edge"),
+                               centre_year = last_historical_year)
+range_EW_lm <- summarise_trend(range_ew_stat, by = c("time_period", "region", "edge"),
+                               centre_year = last_historical_year)
 
 edge_meta <- tibble::tribble(
   ~axis, ~edge,      ~indicator,   ~name,
@@ -907,7 +794,6 @@ edge_summary <- bind_rows(
     prob_direction,
     units = "km / year"
   )
-
 ```
 
 ```{r approx-scratch}
@@ -955,15 +841,14 @@ edge_summary <- bind_rows(
 
 ```{r mean-depth}
 # @Question - mean depth, not mean log_depth correct?
-d_by_sim <- sims |>
-  group_by(time_period, region, year, sim) |>
-  summarise(
-    mean_depth = weighted.mean(depth_m, w = exp(log_abundance)),
-    .groups = "drop"
-  )
+depth_stat <- sim_stat_bind(
+  abundance_by_group(sims, weighted_cols = "depth_m"),
+  abundance_by_group(sims, weighted_cols = "depth_m", by_region = FALSE)
+)
+names(depth_stat$mats) <- c("total_abundance", "mean_depth")
+depth_stat$mats$total_abundance <- NULL
 
-mean_depth_sims <- d_by_sim |>
-  summarise_sim_ci(mean_depth, c(time_period, region, year))
+mean_depth_sims <- summarise_estimates(depth_stat)
 
 ggplot(data = mean_depth_sims) +
   aes(x = year, y = est, ymin = lwr, ymax = upr, groups = region) +
@@ -973,9 +858,8 @@ ggplot(data = mean_depth_sims) +
   labs(x = "Year", y = "Mean depth") +
   facet_wrap(~ region)
 
-depth_lm <- d_by_sim |>
-  mutate(centred_year = year - last_historical_year) |>
-  summarise_sim_trend(value = mean_depth, by = c(time_period, region))
+depth_lm <- summarise_trend(depth_stat, by = c("time_period", "region"),
+                            centre_year = last_historical_year)
 
 depth_summary <- depth_lm |>
   filter(term == "centred_year") |>
@@ -1019,7 +903,6 @@ bind_rows(
   kableExtra::column_spec(3, width = "1.5cm") |>
   kableExtra::column_spec(4, width = "1.3cm") |>
   kableExtra::column_spec(5, width = "1.7cm") |>
-  kableExtra::column_spec(6, width = "1.7cm") |>
-  kableExtra::column_spec(7, width = "2.2cm")
+  kableExtra::column_spec(6, width = "1.7cm")
 
 ```

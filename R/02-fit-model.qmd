@@ -18,12 +18,15 @@ library(sf)
 source(here::here("R", "00-settings.R"))
 source(here::here("R/functions.R"))
 
+##@TODO: region has a reserved meaning for DSAF reporting aggregation (see split-cell area accounting in 01-data-prep.qmd) — never add it as a model covariate, or split cells will get artificially discontinuous density
+# add: stopifnot(!"region" %in% attr(terms(formula), "term.labels")) check somewhere
+
+#@TODO - worth making it easier to sub in different covariate data
+
 dog <- readRDS(file.path(model_input_dir, "dogfish.rds"))
 prediction_grid <- readRDS(file.path(model_input_dir, "prediction-grid.rds")) |>
   filter(year <= 2040)
 cell_polygons <- readRDS(file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
-
-
 
 ```
 
