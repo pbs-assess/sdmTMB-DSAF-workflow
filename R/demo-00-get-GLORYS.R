@@ -84,6 +84,8 @@ end_date   <- format(min(Sys.Date(), product_end), "%Y-%m-%d")
 # SpatRaster in memory because the `terra::rast()` is picky about dimension
 # regularity/naming.
 # Allows for handling as terra object for rest of workflow.
+# Daily: "cmems_mod_glo_phy_my_0.083deg_P1D-m"
+# Monthly: "cmems_mod_glo_phy_my_0.083deg_P1M-m"
 if (!file.exists(output_filepath)) {
   bottom_temp <- cms_download_subset(
     product       = "GLOBAL_MULTIYEAR_PHY_001_030",
