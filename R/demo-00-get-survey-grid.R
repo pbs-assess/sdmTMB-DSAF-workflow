@@ -29,7 +29,11 @@ grid_spacing <- 2000 # maybe use 7km since that is ~3.5 nautical miles - I think
 full_grid <- dog_sf |>
   sf::st_make_grid(cellsize = c(grid_spacing, grid_spacing)) |>
   sf::st_as_sf() |>
-  dplyr::rename(geometry = x)
+  dplyr::rename(geometry = x) |>
+  # Cell id = position in the full grid, assigned before any clipping so it is
+  # a stable key (one id per grid square, even if clipping splits a square
+  # into several pieces) and is saved with the grid
+  mutate(cell = row_number())
 
 
 # 4. Overlay grid with sampling domain - 2 options:
@@ -95,5 +99,58 @@ ggplot() +
   theme_minimal() +
   gfplot::coord_sf_auto(dog_sf)
 
-saveRDS(poly_grid_land_clipped, file.path(data_gen_dir, "dogfish-poly-grid.rds"))
+# 5. Split cells at region boundaries ------------------------------------------
+# Toy N/S split of WCVI (R/make-wcvi-region-polygons.R) standing in for real
+# management units (e.g. NAFO divisions). Cells straddling a boundary get one
+# row per region, each with its own recalculated area; pieces keep the parent
+# `cell` id.
+grid <- poly_grid_land_clipped
+
+region_polys <- sf::st_read(
+  file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp"),
+  quiet = TRUE
+) |>
+  sf::st_transform(utm_crs) |>
+  select(region) # standardise the management-unit column name to "region"
+
+grid_region <- suppressWarnings(
+  sf::st_intersection(grid, region_polys) |>
+    sf::st_collection_extract("POLYGON")
+) |>
+  mutate(area = as.numeric(sf::st_area(geometry)) / 1e6) |> # km^2
+  filter(area > 1e-6) |> # drop GEOS sliver artifacts along the split line
+  group_by(cell, region) |>
+  summarise(area = sum(area), .groups = "drop")
+
+# One X/Y per cell: the centroid of the kept area (the union of its pieces),
+# shared by all pieces of a split cell. Covariates are extracted at this X/Y,
+# so the halves of a split cell get identical covariate values and no
+# artificial discontinuity at the region boundary.
+cell_xy <- grid_region |>
+  group_by(cell) |>
+  summarise(.groups = "drop") |>
+  sf::st_centroid() |>
+  mutate(
+    X = sf::st_coordinates(geometry)[, "X"] / 1000, # km
+    Y = sf::st_coordinates(geometry)[, "Y"] / 1000
+  ) |>
+  sf::st_drop_geometry()
+grid_region <- grid_region |>
+  left_join(cell_xy, by = "cell") |>
+  relocate(X, Y, .after = region)
+
+# Area check: the split grid should cover the land-clipped grid (~0)
+sum(as.numeric(sf::st_area(grid))) / 1e6 - sum(grid_region$area)
+# Number of cells split across regions
+grid_region |> sf::st_drop_geometry() |> count(cell) |> filter(n > 1) |> nrow()
+
+ggplot() +
+  geom_sf(data = grid_region, aes(fill = region), colour = NA) +
+  geom_sf(data = grid_region |> group_by(region) |> summarise(), fill = NA, colour = "black") +
+  theme_minimal() +
+  gfplot::coord_sf_auto(grid_region)
+
+# Only the region-split grid is saved; the unsplit grid is
+# `grid_region |> group_by(cell) |> summarise(area = sum(area))`
+saveRDS(grid_region, file.path(data_gen_dir, "dogfish-poly-grid.rds"))
 
