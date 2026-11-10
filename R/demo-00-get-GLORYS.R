@@ -1,21 +1,22 @@
-# pak::pak("CopernicusMarine")  # CRAN release
-# pak::pak("CFtime")
-# pak::pak(c('keyring', 'askpass'))
-# pak::pak('ncmeta')
+# pak::pak("CopernicusMarine")       # CRAN release
+# pak::pak("CFtime")                 # stars needs it to parse NetCDF time stamps; without it time comes back as raw numbers
+# pak::pak(c('keyring', 'askpass'))  # secure password storage (sec 0b)
+# pak::pak('ncmeta')                 # optional: not used here, but handy for inspecting .nc files (ncmeta::nc_vars())
+# Also called below via `pkg::`: here, cli, gfplot, tidyterra, pacea, cmocean
 library(CopernicusMarine)
-library(stars)   # only needed for the download/write step below (sec 3)
+library(stars)   # only needed for the download/write step below (sec 3): write_mdim() keeps the time dimension
 library(sf)
 library(ggplot2)
-
-library(terra)
+library(terra)   # attached so plot() dispatches to SpatRaster methods; other calls use terra::
 
 source(here::here("R", "00-settings.R"))
-output_filepath <- file.path(data_raw_dir, "glorys-bottom-temp.nc")
-bt_june_yearly_nc_filepath <- file.path(data_gen_dir, "glorys-bottom-temp-june-yearly.nc")
-
+output_filepath <- file.path(data_raw_dir, "glorys-bottom-temp-monthly.nc")
 
 # This script demonstrates how you can query Copernicus and get bottom temperature
-# It DOES NOT need to be run to get "glorys-bottom-temp-june-yearly.rds" (which is on github)
+# The monthly file it writes is used as-is downstream: attach_covariate() picks
+# the layer for each set's date (date_col =) and, on the prediction grid, the
+# chosen month of each year (month =; several months are averaged).
+# The extent and start year come from the survey sets data.
 
 # ==========================================================================
 # ONE-TIME SETUP -- run these lines once, interactively, in the console.
@@ -43,10 +44,11 @@ cms_set_username(username)
 cms_set_password(
   keyring::key_get(service = "copernicus_marine", username = username)
 )
-cms_login()  # returns TRUE if authentication succeeded, FALSE otherwise
+cms_login()  # errors if authentication fails; otherwise returns your account info
 
 # --- 2. (Optional) confirm the variable name --------------
-# GLORYS bottom temperature lives in the daily multi-year reanalysis product.
+# GLORYS bottom temperature is in the multi-year reanalysis product
+# (GLOBAL_MULTIYEAR_PHY_001_030), which has daily and monthly layers.
 # Variable naming can shift between product revisions, so it's worth
 # checking the product's variable list once before relying on "bottomT":
 # vignette("product-info")  # or browse the product page directly
@@ -54,98 +56,119 @@ cms_login()  # returns TRUE if authentication succeeded, FALSE otherwise
 
 # --- 3. Download a bottom-temperature subset for a region -----------------
 # Can load survey data to extract relevant parameters (time and spatial extent)
-dog <- sdmTMB::dogfish
-dog_sf <- gfplot::XY_to_sf(dog)
+dog <- readRDS(file.path(data_gen_dir, "dogfish-syn-wcvi-sets.rds"))
+dog_sf <- st_as_sf(dog, coords = c("lon_start", "lat_start"), crs = 4326) # lon/lat: the degree buffer below relies on this
 
 # Spatial extent ------
 # Load data domain or manually specify region in this order: c(xmin, ymin, xmax, ymax)
-region <- st_bbox(dog_sf)
+# Use your prediction grid's bbox (in lon/lat) if you have one; the set
+# locations alone can miss outer grid cells. The 0.25 deg buffer (3 GLORYS
+# cells) keeps edge cells and bilinear extraction inside the raster.
+region <- st_bbox(dog_sf) |>
+  unclass()
+region <- region + c(-0.25, -0.25, 0.25, 0.25)
+
+# Layer -----
+# Monthly means rather than daily: daily over a large region and 30+ years is
+# several GB, and monthly is enough for yearly or seasonal covariates.
+# Daily:   "cmems_mod_glo_phy_my_0.083deg_P1D-m"
+# Monthly: "cmems_mod_glo_phy_my_0.083deg_P1M-m"
+copernicus_product <- "GLOBAL_MULTIYEAR_PHY_001_030"
+copernicus_layer   <- "cmems_mod_glo_phy_my_0.083deg_P1M-m" # for cod - monthly seemed good enough
 
 # Temporal extent -----
-# Get date range available for copernicus product
-copernicus_product <- "GLOBAL_MULTIYEAR_PHY_001_030"
-product_details <- cms_product_details(copernicus_product)
-product_interval <- product_details$extent$temporal$interval[[1]]
-product_interval
+# Read the date range of the layer (not the whole product -- daily and monthly
+# layers can end on different dates) from the STAC catalogue; no login needed.
+# Catalogue IDs carry a version suffix (e.g. "_202311"), so match by prefix.
+product_meta <- cms_product_metadata(copernicus_product)
+layer_idx <- which(startsWith(product_meta$id, paste0(copernicus_layer, "_")))
+if (length(layer_idx) != 1) {
+  cli::cli_abort("Layer {.val {copernicus_layer}} not found (or not unique) in {.val {copernicus_product}} metadata.")
+}
+layer_extent <- unlist(product_meta$properties[[layer_idx]][["cube:dimensions"]]$time$extent)
+layer_extent
 
-product_start <- as.Date(substr(product_interval[[1]], 1, 10)) # ISO 8601 timestamps -- the date is always the first 10 characters
-product_end   <- as.Date(substr(product_interval[[2]], 1, 10))
+layer_start <- as.Date(substr(layer_extent[[1]], 1, 10)) # ISO 8601 timestamps -- the date is always the first 10 characters
+layer_end   <- as.Date(substr(layer_extent[[2]], 1, 10))
 
-# Restrict to what the product actually covers
-# start date: 1993
+# Restrict to what the layer actually covers
+# start date: January of the first survey year, but no earlier than the layer
+#             start (1993)
 # end date:   lags behind Sys.Date() by a processing delay.
-start_date <- format(max(as.Date(sprintf("%d-01-01", min(dog$year))), product_start), "%Y-%m-%d")
-end_date   <- format(min(Sys.Date(), product_end), "%Y-%m-%d")
+# Downloading to the latest month (not just the last survey year) leaves the
+# most recent conditions available as a starting point for forecasts.
+start_date <- format(max(as.Date(sprintf("%d-01-01", min(dog$year))), layer_start), "%Y-%m-%d")
+end_date   <- format(min(Sys.Date(), layer_end), "%Y-%m-%d")
 
 # Download (via CopernicusMarine, which returns a stars object) and cache to
 # disk as a proper multidimensional NetCDF (write_mdim() -- write_stars()
-# only does 2D array).
+# flattens extra dimensions into bands and drops the time coordinate).
 # Safer to write to mdim and read back in using terra rather than converting to
 # SpatRaster in memory because the `terra::rast()` is picky about dimension
 # regularity/naming.
 # Allows for handling as terra object for rest of workflow.
-# Daily: "cmems_mod_glo_phy_my_0.083deg_P1D-m"
-# Monthly: "cmems_mod_glo_phy_my_0.083deg_P1M-m"
+# This downloads everything in one file and skips if it already exists; to
+# add new months later, delete the file and re-run. (For one-file-per-year
+# downloads that only fetch missing years, see download_glorys() in
+# NCAM/analysis/spatial_model/R/covariate_download_helpers.R, in the NCAM
+# project)
 if (!file.exists(output_filepath)) {
   bottom_temp <- cms_download_subset(
-    product       = "GLOBAL_MULTIYEAR_PHY_001_030",
-    layer         = "cmems_mod_glo_phy_my_0.083deg_P1D-m",
+    product       = copernicus_product,
+    layer         = copernicus_layer,
     variable      = "bottomT",
     region        = region,
     timerange     = c(start_date, end_date),
     progress      = TRUE
   )
+  # Expect GDAL warnings ("Dimension ... lacks a indexing variable",
+  # "SetIndexingVariable() not implemented"): the netCDF writer can't formally
+  # link dimensions to coordinate variables, but it still writes them under the
+  # dimension names, which CF readers (terra, stars) treat as coordinates.
   write_mdim(bottom_temp["bottomT"], output_filepath)
+  cli::cli_inform(c(
+    "v" = "Saved monthly GLORYS bottom temperature ({start_date} to {end_date}) to {.file {output_filepath}}."
+  ))
+} else {
+  cli::cli_inform(c(
+    "i" = "{.file {output_filepath}} already exists; skipping download. Delete it and re-run to refresh."
+  ))
 }
 
-# --- 4. Save as terra and inspect -------
-bt_daily <- terra::rast(output_filepath)
+# --- 4. Read back with terra and inspect -------
+bt_monthly <- terra::rast(output_filepath)
 
 # Fail fast if GDAL/terra didn't parse the CF time/CRS metadata cleanly
-if (anyNA(terra::time(bt_daily)) || !nzchar(terra::crs(bt_daily))) {
+if (anyNA(terra::time(bt_monthly)) || !nzchar(terra::crs(bt_monthly))) {
   cli::cli_abort("{.file {output_filepath}} did not parse valid time/CRS metadata into terra.")
 }
 
-bt_daily
+bt_monthly
 
-plot(bt_daily[[1]], col = hcl.colors(100, "RdYlBu", rev = TRUE), axes = TRUE) # base R option
+plot(bt_monthly[[1]], col = hcl.colors(100, "RdYlBu", rev = TRUE), axes = TRUE) # base R option
 
 # Aggregate over time (e.g. mean), then plot:
-bt_mean <- terra::app(bt_daily, mean, na.rm = TRUE)
+bt_mean <- terra::app(bt_monthly, mean, na.rm = TRUE)
 plot(bt_mean, col = hcl.colors(100, "RdYlBu", rev = TRUE), axes = TRUE)
 
 ggplot() +
-  tidyterra::geom_spatraster(data = bt_daily[[1]]) +
+  tidyterra::geom_spatraster(data = bt_monthly[[1]]) +
   scale_fill_gradientn(colours = hcl.colors(100, "RdYlBu", rev = TRUE), na.value = NA)
 
-# --- 5. Pull June values, aggregate to yearly means, and save -------------
-june_idx <- which(format(terra::time(bt_daily), "%m") == "06")
-bt_june <- bt_daily[[june_idx]]
+# --- 5. Plot June of each year -------------------------------------------
+bt_june <- bt_monthly[[format(terra::time(bt_monthly), "%m") == "06"]]
+names(bt_june) <- format(terra::time(bt_june), "%Y")
 
-years <- format(terra::time(bt_june), "%Y")
-bt_june_yearly <- terra::tapp(bt_june, index = years, fun = mean, na.rm = TRUE)
-names(bt_june_yearly) <- unique(years)
-terra::time(bt_june_yearly) <- as.Date(paste0(unique(years), "-06-01"))
-
-# Save derived/summarised data layer as a CF NetCDF (year as time step)
-terra::writeCDF(
-  bt_june_yearly, bt_june_yearly_nc_filepath,
-  varname = "bottomT", longname = "Bottom temperature", unit = "degC",
-  zname = "time", overwrite = TRUE
-)
-
-# --- 6. Inspect / plot the final product -----------------------------------
 ggplot() +
   geom_sf(data = pacea::bc_coast) +
-  tidyterra::geom_spatraster(data = bt_june_yearly) +
+  tidyterra::geom_spatraster(data = bt_june) +
   facet_wrap(~ lyr, ncol = 4) +
   scale_fill_gradientn(colours = cmocean::cmocean("thermal")(100), na.value = NA) +
-  # scale_x_continuous(breaks = scales::pretty_breaks(n = 3)) +
-  # scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
   gfplot::coord_sf_auto(dog_sf) +
   theme(axis.text = element_blank())
 
-# --- 7. Cite the product (required under CMEMS terms of use) --------------
-# Only works if CopernicusMarine auth ran above
+# --- 6. Cite the product (required under CMEMS terms of use) --------------
+# Public catalogue lookup, so no login needed. Despite the name, `$doi` holds
+# the full citation text (with the DOI at the end).
 # cms_cite_product("GLOBAL_MULTIYEAR_PHY_001_030")$doi
 # [1] "E.U. Copernicus Marine Service Information; Global Ocean Physics Reanalysis - GLOBAL_MULTIYEAR_PHY_001_030 (2012-08-26). DOI:10.48670/moi-00021"
