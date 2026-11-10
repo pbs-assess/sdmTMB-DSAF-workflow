@@ -67,7 +67,7 @@ summarise_sim_trend <- function(df, value, by) {
       se             = stats::sd(coef_est),
       lwr            = stats::quantile(coef_est, 0.025),
       upr            = stats::quantile(coef_est, 0.975),
-      prob_direction = 2 * min(mean(coef_est > 0), mean(coef_est < 0)),
+      prob_direction = max(mean(coef_est > 0), mean(coef_est < 0)),
       .by = c(term, {{ by }})
     )
 }
