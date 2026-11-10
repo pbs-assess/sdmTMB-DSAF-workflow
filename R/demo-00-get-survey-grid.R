@@ -3,16 +3,16 @@ library(ggplot2)
 
 source(here::here("R", "00-settings.R"))
 
-# 1. Load survey data
-dog <- sdmTMB::dogfish
-utm_crs <- sdmTMB::get_crs(dog, ll_names = c("longitude", "latitude")) # get UTM crs for data region
+# 1. Load survey data (SYN WCVI dogfish sets; demo-00-get-survey-data.R)
+dog <- readRDS(file.path(data_gen_dir, "dogfish-syn-wcvi-sets.rds"))
+utm_crs <- sdmTMB::get_crs(dog, ll_names = c("lon_start", "lat_start")) # get UTM crs for data region
 
 # 2. Convert dataframe to sf object if not already; use equal distance projection (needed??)
 dog_sf <-
   dog |>
-  dplyr::select(year, longitude, latitude) |>
-  dplyr::filter(!(is.na(longitude) | is.na(latitude))) |>
-  sf::st_as_sf(coords = c('longitude', 'latitude'), crs = 'WGS84') |>
+  dplyr::select(year, lon_start, lat_start) |>
+  dplyr::filter(!(is.na(lon_start) | is.na(lat_start))) |>
+  sf::st_as_sf(coords = c("lon_start", "lat_start"), crs = 4326) |>
   sf::st_transform(crs = utm_crs)
 
 # Optional: Can make survey grid using recent / modern sampling domain
