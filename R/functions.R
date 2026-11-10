@@ -1,3 +1,10 @@
+# Shift-indicator engine (make_sim_draws(), sim_stat(), summarise_trend(), ...)
+# lives in the dshift package (./dshift). After editing it, reinstall with
+# pak::local_install("dshift") or use devtools::load_all("dshift") interactively.
+# @warning - temporarly location of library loading to capture dshift pkg since
+#            we always call R/functions.R
+library(dshift)
+
 meep <- function(user = "jilliandunic", ...) {
   current_user <- Sys.info()['user']
 
@@ -6,43 +13,33 @@ meep <- function(user = "jilliandunic", ...) {
   }
 }
 
-#' Combine `project()` linear predictors into density or log density
+#' Shared internal borders between adjacent region polygons
+#' #@todo - I am not sold this is even needed
+#' Returns only the edges shared by two or more regions (the internal
+#' dividers), so you can draw the boundaries between regions without the
+#' surrounding outer box. Purely topological -- makes no assumption about
+#' border orientation, so it finds perpendicular-to-coast splits and any
+#' other adjacency equally.
 #'
-#' Applies each linear predictor's own `linkinv()` before combining, so this
-#' works for single-linear-predictor models, standard delta models (e.g.
-#' logit + log), and poisson-link delta models alike -- no assumption about
-#' which links were used. For poisson-link families the log-density case
-#' reduces to `est1 + est2` because both components use a log link; for
-#' standard delta models it does not, so the two forms aren't interchangeable.
+#' @param polys An `sf` of two or more (MULTI)POLYGON region features that
+#'   meet edge-to-edge (adjacent regions must share exact boundaries, not
+#'   overlap or leave gaps). CRS is preserved on the output.
 #'
-#' Always sums in log space first, then exponentiates only if `log = FALSE`.
-#' For poisson-link delta models both components are unbounded `exp()`
-#' outputs, so their product can overflow to `Inf` even when each component
-#' is individually representable -- computing the product before logging
-#' would lose an otherwise-finite log-density to that overflow.
-#'
-#' @param projections Output of `project()`: an `est1`/`est2` list for delta
-#'   models, or an object with `est1` for single-linear-predictor models.
-#' @param fit A fitted sdmTMB model object.
-#' @param log If `TRUE` (default), return log density. If `FALSE`, return
-#'   density on the natural scale (`exp()` of the log density) -- this can
-#'   legitimately be `Inf` for poisson-link models if the log density itself
-#'   overflows double precision once exponentiated.
-#'
-#' @return A matrix of log-density (or density) draws, one row per `newdata`
-#'   row and one column per `nsim` draw.
-return_density <- function(projections, fit, log = TRUE) {
-  if (isTRUE(fit$family$delta)) {
-    log_density <- log(fit$family[[1]]$linkinv(projections$est1)) +
-      log(fit$family[[2]]$linkinv(projections$est2))
-  } else {
-    log_density <- log(fit$family$linkinv(projections$est1))
-  }
-  if (log) log_density else exp(log_density)
+#' @return An `sf` of the shared borders as `LINESTRING`s, with an
+#'   `n.overlaps` column (number of regions sharing each segment). Empty if
+#'   no regions share an edge.
+get_region_borders <- function(polys) {
+  b <- sf::st_intersection(sf::st_boundary(polys))  # pairwise self-intersections
+  b <- b[b$n.overlaps > 1, ]                        # keep only shared edges
+  b <- sf::st_collection_extract(b, "LINESTRING") # not sure if we should suppress these yet until we test more polygons
+  # b <- suppressWarnings(sf::st_collection_extract(b, "LINESTRING")) # option to suppress
+  sf::st_sf(geometry = sf::st_geometry(b))          # drop misleading per-region attrs
 }
+
 
 #' Print a reminder of key model configuration
 #'
+#' #' #@todo - I am not sold this is even needed either - cod uses extensive caching instead
 #' Surfaces the settings most likely to affect how shift indicators should
 #' be interpreted -- model formula, spatial/spatiotemporal random field
 #' structure, time-varying terms, and family -- as a `cli` message. Meant to be called
