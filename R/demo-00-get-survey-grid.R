@@ -38,7 +38,7 @@ full_grid <- dog_sf |>
 
 # 4. Overlay grid with sampling domain - 2 options:
   # a) intersect against sampled data points only
-  # b) polygon covering full survey domain; land removed
+  # b) polygon covering full survey domain, clipped to the surveyed depth range
 
 # 4a) intersect against sampled data points only  ------------------------------
 intersect_points <- sf::st_intersects(full_grid, dog_sf)
@@ -51,7 +51,7 @@ ggplot(data = point_grid) +
   geom_sf(data = dog_sf, alpha = 0.5) +
   theme_minimal()
 
-# 4b) polygon covering full survey domain; land removed ------------------------
+# 4b) polygon covering full survey domain ------------------------------------
 dog_poly <- dog_sf |>
   sf::st_union() |>
   sf::st_concave_hull(ratio = 0.3, allow_holes = FALSE) |> # ratio adjust detail/corners (1 = convex hull)
@@ -69,33 +69,69 @@ ggplot() +
   geom_sf(data = dog_poly, fill = NA) +
   theme_minimal()
 
-# Remove land footprint. Here using `bcmaps::bc_bound()`
-# bcmaps::available_layers()
-# bcmaps::bc_bound_hres() # (if detailed coastal features needed; but very large object)
-land_bc0 <- bcmaps::bc_bound() |>
-  sf::st_transform(crs = utm_crs) |>
+# 4c) clip the footprint to the surveyed GEBCO depth range ---------------------
+# GEBCO (demo-00-get-GEBCO.R) is also the model's depth covariate
+# (01-data-prep), so the grid and the covariate share one coastline: land and
+# the nearshore drop out at the depth floor, and no cell is left with a depth
+# <= 0 to be dropped later. The cap keeps prediction within the depths the
+# survey sampled rather than extrapolating the depth effect down the slope.
+gebco <- terra::rast(file.path(data_raw_dir, "gebco-depth.nc")) # m, positive down
+
+# Limits from GEBCO at the sets (not recorded depth) so they're on the same
+# scale as the clip. The deepest recorded sets (765-803 m) are 215-426 m in
+# GEBCO: tow start positions on a steep slope.
+set_depth_gebco <- terra::extract(
+  gebco, terra::vect(sf::st_transform(dog_sf, terra::crs(gebco)))
+)[, 2]
+depth_limits <- c(floor(min(set_depth_gebco, na.rm = TRUE)), ceiling(max(set_depth_gebco, na.rm = TRUE)))
+# depth_limits <- c(50, 1300) # or set by hand, e.g. the WCVI survey strata
+
+# Work in GEBCO's lon/lat CRS (no raster resampling); crop first so polygonising is fast
+gebco_crop <- terra::crop(gebco, terra::vect(sf::st_transform(dog_poly, terra::crs(gebco))), snap = "out")
+depth_poly <- terra::ifel(gebco_crop >= depth_limits[1] & gebco_crop <= depth_limits[2], 1, NA) |>
+  terra::as.polygons(dissolve = TRUE) |>
+  sf::st_as_sf() |>
+  sf::st_transform(utm_crs) |>
+  sf::st_make_valid() |>
   sf::st_union()
-land_bc <- land_bc0 |>
-  sf::st_buffer(1000) # could apply buffer to land
 
-dog_poly_land_clipped <- sf::st_difference(dog_poly, land_bc)
+# The raw clip has dozens of tiny pieces and holes, nearly all single GEBCO
+# pixels (15 arc-sec, ~0.15 km2). Drop pieces and fill holes smaller than one
+# grid cell.
+min_area <- grid_spacing^2 # m^2
+dog_poly_depth <- sf::st_intersection(dog_poly, depth_poly) |>
+  sf::st_cast("POLYGON") |>
+  (\(pieces) pieces[as.numeric(sf::st_area(pieces)) >= min_area])() |>
+  purrr::map(\(p) {
+    # ring 1 is the outer boundary; the rest are holes (planar area, UTM m)
+    ring_area <- purrr::map_dbl(p, \(ring) sf::st_area(sf::st_polygon(list(ring))))
+    sf::st_polygon(p[c(TRUE, ring_area[-1] >= min_area)])
+  }) |>
+  sf::st_sfc(crs = utm_crs) |>
+  sf::st_union()
 
-# st_intersection() cuts each cell's geometry down to the overwater area,
-poly_grid_land_clipped <- suppressWarnings(
+# st_intersection() cuts each cell's geometry down to the in-range area
+poly_grid_clipped <- suppressWarnings(
   full_grid |>
-    sf::st_intersection(dog_poly_land_clipped) |>
+    sf::st_intersection(dog_poly_depth) |>
     sf::st_collection_extract("POLYGON") # drop stray point/line slivers from edge-touching intersections
 )
 
 # Note that we now have grid cells with different areas
-poly_grid_land_clipped |> mutate(area = sf::st_area(geometry)) |>
+poly_grid_clipped |> mutate(area = sf::st_area(geometry)) |>
   arrange(area)
 
+# official_grid <- gfdata::load_survey_blocks("synoptic") |> filter(survey_abbrev == "SYN WCVI")
+# range(official_grid$depth_m, na.rm = TRUE)
+
 ggplot() +
-  geom_sf(data = land_bc0) +
-  geom_sf(data = poly_grid_land_clipped) +
-  geom_sf(data = dog_sf) +
-  geom_sf(data = dog_poly_land_clipped, fill = NA, colour = "red") +
+  geom_sf(data = pacea::bc_coast, fill = "grey85", colour = NA) +
+  geom_sf(data = poly_grid_clipped) +
+  geom_sf(data = dog_sf, size = 0.3) +
+  geom_sf(data = dog_poly, fill = NA, colour = "black") +
+  geom_sf(data = dog_poly_depth, fill = NA, colour = "red") +
+  # geom_sf(data = official_grid, aes(fill = log10(depth_m)), alpha = 0.4) +
+  labs(subtitle = sprintf("Footprint (black) clipped to GEBCO %g-%g m (red)", depth_limits[1], depth_limits[2])) +
   theme_minimal() +
   gfplot::coord_sf_auto(dog_sf)
 
@@ -104,7 +140,7 @@ ggplot() +
 # management units (e.g. NAFO divisions). Cells straddling a boundary get one
 # row per region, each with its own recalculated area; pieces keep the parent
 # `cell` id.
-grid <- poly_grid_land_clipped
+grid <- poly_grid_clipped
 
 region_polys <- sf::st_read(
   file.path(data_raw_dir, "wcvi-region-polygons", "wcvi-region-polygons.shp"),
@@ -139,7 +175,7 @@ grid_region <- grid_region |>
   left_join(cell_xy, by = "cell") |>
   relocate(X, Y, .after = region)
 
-# Area check: the split grid should cover the land-clipped grid (~0)
+# Area check: the split grid should cover the clipped grid (~0)
 sum(as.numeric(sf::st_area(grid))) / 1e6 - sum(grid_region$area)
 # Number of cells split across regions
 grid_region |> sf::st_drop_geometry() |> count(cell) |> filter(n > 1) |> nrow()
