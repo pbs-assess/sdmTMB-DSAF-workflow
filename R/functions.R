@@ -78,6 +78,44 @@ remind_model_info <- function(fit) {
   invisible(fit)
 }
 
+#' Check that saved inputs share one set of data sources
+#'
+#' `01-data-prep` attaches a `data_sources` attribute (survey, grid and
+#' covariate files) to everything it saves, because a re-render with different
+#' sources silently overwrites them. Call this after loading inputs downstream
+#' so a fit and a grid built from different sources can't be combined, and so
+#' the rendered document records the sources.
+#'
+#' @param ... Named objects carrying a `data_sources` attribute (e.g. data,
+#'   prediction grid, fit).
+#'
+#' @return The shared `data_sources` list, invisibly.
+check_data_sources <- function(...) {
+  sources <- purrr::map(list(...), \(x) attr(x, "data_sources"))
+  missing <- names(sources)[purrr::map_lgl(sources, is.null)]
+  if (length(missing)) {
+    cli::cli_abort("No {.field data_sources} attribute on {.val {missing}}; re-render {.file 01-data-prep.qmd}.")
+  }
+  # `created` differs between runs with identical sources
+  same <- purrr::map_lgl(sources, \(x) identical(x[names(x) != "created"], sources[[1]][names(sources[[1]]) != "created"]))
+  if (!all(same)) {
+    cli::cli_abort(c(
+      "Inputs were built from different data sources: {.val {names(sources)[!same]}} differ{?s/} from {.val {names(sources)[1]}}.",
+      "i" = "Re-render {.file 01-data-prep.qmd} and refit, or load matching files."
+    ))
+  }
+  src <- sources[[1]]
+  cli::cli_inform(c(
+    "i" = "Data sources (from 01-data-prep, {format(src$created, '%Y-%m-%d %H:%M')}):",
+    purrr::set_names(
+      paste0(names(src)[names(src) != "created"], ": ",
+             purrr::map_chr(src[names(src) != "created"], \(x) if (is.null(x)) "NULL" else paste(x, collapse = ", "))),
+      "*"
+    )
+  ))
+  invisible(src)
+}
+
 
 # Covariate standard notes -------------------------------------------------------
 # @note: IN PROGRESS - main testing is in NCAM - remember to port back to here
