@@ -15,7 +15,9 @@ make_sim_draws(
 \arguments{
 \item{prediction_grid}{The \code{newdata} grid used to generate \code{log_density}
 (row order must match \code{log_density}'s rows) -- one row per cell x
-region x year, must contain \code{year} and \code{area}.}
+region x year. Must contain \code{year}, \code{area} (km², per region piece for
+split cells), and \code{region}, the reporting unit indicators are grouped by
+(rename e.g. \code{NAFOdiv} to \code{region} before calling).}
 
 \item{log_density}{Log-scale density matrix, one row per \code{prediction_grid}
 row and one column per simulation draw. For sdmTMB, this is

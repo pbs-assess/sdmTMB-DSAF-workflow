@@ -53,7 +53,9 @@ return_density <- function(projections, fit, log = TRUE) {
 #'
 #' @param prediction_grid The `newdata` grid used to generate `log_density`
 #'   (row order must match `log_density`'s rows) -- one row per cell x
-#'   region x year, must contain `year` and `area`.
+#'   region x year. Must contain `year`, `area` (km², per region piece for
+#'   split cells), and `region`, the reporting unit indicators are grouped by
+#'   (rename e.g. `NAFOdiv` to `region` before calling).
 #' @param log_density Log-scale density matrix, one row per `prediction_grid`
 #'   row and one column per simulation draw. For sdmTMB, this is
 #'   `return_density(projections, fit, log = TRUE)` (the default) -- kept as
@@ -75,6 +77,10 @@ make_sim_draws <- function(prediction_grid, log_density, last_historical_year,
                             type = NULL, model_name = NULL) {
   if (nrow(log_density) != nrow(prediction_grid)) {
     cli::cli_abort("{.arg log_density} must have one row per row of {.arg prediction_grid}.")
+  }
+  missing_cols <- setdiff(c("year", "area", "region"), names(prediction_grid))
+  if (length(missing_cols)) {
+    cli::cli_abort("{.arg prediction_grid} is missing column{?s} {.field {missing_cols}}.")
   }
   grid <- prediction_grid
   grid$time_period <- factor(
