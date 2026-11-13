@@ -1,5 +1,6 @@
 # Define directories in once place to make it easier to change downstream pointers
 data_raw_dir <- here::here("data-raw")
+dir.create(data_raw_dir, showWarnings = FALSE, recursive = TRUE)
 
 data_gen_dir <- here::here("data-generated")
 dir.create(data_gen_dir, showWarnings = FALSE, recursive = TRUE)
