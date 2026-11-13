@@ -1,3 +1,4 @@
+# Directory structure -------
 # Define directories in once place to make it easier to change downstream pointers
 data_raw_dir <- here::here("data-raw")
 dir.create(data_raw_dir, showWarnings = FALSE, recursive = TRUE)
@@ -23,16 +24,10 @@ dir.create(fit_dir, showWarnings = FALSE)
 # sdmTMB:::get_crs(<survey-set-dataframe>, ll_names = c("lon_start", "lat_start"))
 utm_crs <- 32609
 
-ggplot2::theme_set(gfplot::theme_pbs())
+# -----------------------------------------------------------------------------
+# plotting
+
+theme_set(ggsidekick::theme_sleek())
 
 # use bayesplot blues
 blues <- c("lightest" = "#d1e1ec", "light" = "#b3cde0", "mid" = "#6497b1", "#005b96", "dark" = "#03396c", "darkest" = "#011f4b")
-
-# @Check: this is the wording to use?
-pvalue_labels <- dplyr::tribble(
-  ~p.value, ~p.significant,
-  0.0005,   "Very strong",
-  0.005,    "Strong",
-  0.03,     "Moderate",
-  0.5,      "Not significant"
-)
