@@ -1,7 +1,10 @@
 # dshift
 
 Distribution-shift indicators (abundance, log density, range edges, area
-occupied) computed from posterior simulation draws of sdmTMB projections.
+occupied) computed from posterior simulation draws of sdmTMB projections, and
+`attach_covariate()` for attaching gridded covariates (e.g. depth, bottom
+temperature) to survey points and prediction grids. Covariate files must follow
+the standard described in `?attach_covariate`.
 
 Draft package under active development; the API may change.
 

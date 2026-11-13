@@ -3,7 +3,7 @@ Title: Distribution Shift Indicators from sdmTMB Simulation Draws
 Version: 0.0.0.9000
 Authors@R:
     person("Jillian", "Dunic", , "jillian.dunic@dfo-mpo.gc.ca", role = c("aut", "cre"))
-Description: Computes distribution-shift indicators (abundance, log density, range edges, area occupied) from posterior simulation draws of sdmTMB projections, using a matrix-based calculations. Also summarises estimates and trends across draws.
+Description: Computes distribution-shift indicators (abundance, log density, range edges, area occupied) from posterior simulation draws of sdmTMB projections, using matrix-based calculations. Also summarises estimates and trends across draws, and attaches gridded covariates (e.g. depth, bottom temperature) to survey points and prediction grids.
 License: MIT + file LICENSE
 Imports:
     cli,
@@ -17,8 +17,10 @@ Imports:
     utils
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 8.0.0
 Suggests:
-    sdmTMB (>= 1.2.0)
+    sdmTMB (>= 1.2.0),
+    sf,
+    terra
 URL: https://github.com/pbs-assess/sdmTMB-DSAF-workflow
 BugReports: https://github.com/pbs-assess/sdmTMB-DSAF-workflow/issues
+Config/roxygen2/version: 8.1.1

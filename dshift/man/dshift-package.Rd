@@ -6,7 +6,7 @@
 \alias{dshift-package}
 \title{dshift: Distribution Shift Indicators from sdmTMB Simulation Draws}
 \description{
-Computes distribution-shift indicators (abundance, log density, range edges, area occupied) from posterior simulation draws of sdmTMB projections, using a matrix-based engine so uncertainty propagates through every indicator. Also summarises estimates and trends across draws.
+Computes distribution-shift indicators (abundance, log density, range edges, area occupied) from posterior simulation draws of sdmTMB projections, using matrix-based calculations. Also summarises estimates and trends across draws, and attaches gridded covariates (e.g. depth, bottom temperature) to survey points and prediction grids.
 }
 \seealso{
 Useful links:
@@ -17,11 +17,11 @@ Useful links:
 
 }
 \author{
-\strong{Maintainer}: Jillian Dunic \email{jdunic@gmail.com}
+\strong{Maintainer}: Jillian Dunic \email{jillian.dunic@dfo-mpo.gc.ca}
 
 Authors:
 \itemize{
-  \item Jillian Dunic \email{jdunic@gmail.com}
+  \item Jillian Dunic \email{jillian.dunic@dfo-mpo.gc.ca}
 }
 
 }
