@@ -1,4 +1,5 @@
 source(here::here('R/presentations/enact-privacy-filter.R'))
+source(here::here("R", "00-settings.R"))
 trawl_grid <- gfdata::load_survey_blocks(dataset = "syn_hbll") |>
   filter(grepl("SYN", survey_abbrev))
 
@@ -15,7 +16,7 @@ hbll_grid <- gfdata::load_survey_blocks(dataset = "syn_hbll") |>
 #   comm_dat_shortspine0, comm_dat_ratfish0, comm_dat_arrowtooth0) |>
 #   filter(year >= 2013) |>
 #   sf::st_as_sf(coords = c("lon", "lat"), crs = 'WGS84') |>
-#   sf::st_transform(crs = 32609)
+#   sf::st_transform(crs = utm_crs)
 
 
 data_dir <- here::here("../../gfsynopsis-2025-data/report/data-cache-2026-07")
@@ -25,7 +26,7 @@ comm_dat <- list.files(data_dir, pattern = "\\.rds$", full.names = TRUE) |>
   purrr::map_dfr(~ readRDS(.x)$catch_spatial) |>
   filter(year >= 2013) |>
   sf::st_as_sf(coords = c("lon", "lat"), crs = 'WGS84') |>
-  sf::st_transform(crs = 32609)
+  sf::st_transform(crs = utm_crs)
 
 comm_list <- get_public_grid(dat = comm_dat, cell_size = 2000, .groups = "grid_id")
 percent_omitted <- comm_list$omitted_df |>

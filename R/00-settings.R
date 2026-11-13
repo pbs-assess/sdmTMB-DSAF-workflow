@@ -16,6 +16,12 @@ dir.create(model_out_dir, showWarnings = FALSE, recursive = TRUE)
 fit_dir <- file.path(model_out_dir, "fits")
 dir.create(fit_dir, showWarnings = FALSE)
 
+# -----------------------------------------------------------------------------
+# Other settings -------
+# Set utm zone in one place so you are consistent across your data/meshes/models/predictions
+# one way to choose this is:
+# sdmTMB:::get_crs(<survey-set-dataframe>, ll_names = c("lon_start", "lat_start"))
+utm_crs <- 32609
 
 ggplot2::theme_set(gfplot::theme_pbs())
 

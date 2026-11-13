@@ -5,7 +5,6 @@ source(here::here("R", "00-settings.R"))
 
 # 1. Load survey data (SYN WCVI dogfish sets; download-surveyjoin-data.R)
 dog <- readRDS(file.path(data_gen_dir, "dogfish-syn-wcvi-sets.rds"))
-utm_crs <- sdmTMB::get_crs(dog, ll_names = c("lon_start", "lat_start")) # get UTM crs for data region
 
 # 2. Convert dataframe to sf object if not already; use equal distance projection (needed??)
 dog_sf <-

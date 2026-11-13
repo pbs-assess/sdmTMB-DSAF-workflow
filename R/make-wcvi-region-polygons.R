@@ -7,12 +7,13 @@ source(here::here("R", "00-settings.R"))
 # WCVI survey blocks define the extent to split - keeps the two rectangles
 # tight to the actual survey grid instead of an arbitrary bounding box.
 sb <- gfdata::load_survey_blocks(type = "polygon")
-wcvi_blocks <- sb |> filter(survey_abbrev == "SYN WCVI", active_block)
+wcvi_blocks <- sb |> filter(survey_abbrev == "SYN WCVI", active_block) |>
+  sf::st_transform(utm_crs)
 
 bbox <- sf::st_bbox(wcvi_blocks)
 
 # Buffer the outer extent so the polygons extend beyond grid.
-# Units (m, UTM 9N) match the blocks' native CRS.
+# Units are m in utm_crs (UTM 9N); split_northing below assumes this.
 buffer_m <- 10000
 xmin <- bbox["xmin"] - buffer_m
 xmax <- bbox["xmax"] + buffer_m

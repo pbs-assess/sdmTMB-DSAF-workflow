@@ -22,7 +22,6 @@ library(sf)
 source(here::here("R", "00-settings.R"))
 source(here::here("R", "functions.R"))
 
-# @TODO - Add some kind of CRS protection to make sure that with any of these spatial operations/conversions we are making the correct assumptions about CRS --> In cod I set this in the settings.R script.
 # @TODO - have a separate covariate extraction and joining step like I do in cod, for now keep this demo as is
 
 ```
@@ -123,7 +122,7 @@ dat_sf <- sets |>
   ) |>
   sdmTMB::add_utm_columns(
     ll_names = c("longitude", "latitude"),
-    utm_crs = sf::st_crs(readRDS(grid_file)),
+    utm_crs = utm_crs,
     units = "km"
   ) |>
   sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |>
@@ -171,6 +170,11 @@ ggplot(dat_sf) +
 
 ```{r}
 grid <- readRDS(grid_file)
+# Set X/Y (utm_crs, 00-settings.R) and grid X/Y must share a CRS for the mesh
+# and predictions to line up
+if (sf::st_crs(grid) != sf::st_crs(utm_crs)) {
+  cli::cli_abort("{.file {basename(grid_file)}} is not in {.code utm_crs} (EPSG:{utm_crs}); rebuild it with {.file demo-00-get-survey-grid.R}.")
+}
 
 # Centroids of the whole (unsplit) cells; the covariates are attached here and
 # joined back to the region pieces by `cell`.
