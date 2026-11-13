@@ -88,8 +88,8 @@ if (!file.exists(output_filepath)) {
   # 01-data-prep gives those cells NA log depth.
   depth <- -gebco # This the standard way we will be saving and using the GEBCO data
 
-  # NetCDF with a named variable, to match the covariate standard (see the
-  # notes above attach_covariate() in functions.R)
+  # NetCDF with a named variable, to match the covariate standard (see
+  # ?dshift::attach_covariate)
   terra::writeCDF(
     depth, output_filepath,
     varname = "depth_m", longname = "Depth (GEBCO_2026, 15 arc-sec)", unit = "m",
@@ -139,7 +139,7 @@ ggplot() +
 # Takeaway - bilinear is probably fine.
 # Caveat: the recorded depth describes the whole tow, but we extract at the
 # tow start. #@question: True?
-source(here::here("R", "functions.R")) # attach_covariate()
+source(here::here("R", "functions.R")) # loads dshift (attach_covariate())
 
 sets_depth <- readRDS(file.path(data_gen_dir, "dogfish-syn-wcvi-sets.rds")) |>
   st_as_sf(coords = c("lon_start", "lat_start"), crs = 4326) |>
