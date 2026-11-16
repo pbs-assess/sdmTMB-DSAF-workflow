@@ -1,8 +1,11 @@
 ---
 title: "1. Data Preparation"
-format: html
+format:
+  html:
+    toc: true
+    code-fold: true  # code shown, collapsed by default
 execute:
-  echo: false      # hide code
+  echo: true
   warning: false    # hide warnings
   message: false    # hide messages (e.g. package load chatter)
 ---
@@ -21,82 +24,100 @@ library(sf)
 
 source(here::here("R", "00-settings.R"))
 source(here::here("R", "functions.R"))
-
-# @TODO - have a separate covariate extraction and joining step like I do in cod, for now keep this demo as is
-
 ```
 
-### 1. Data preparation
+### Overview {#overview}
 
-* Covariates are attached with `attach_covariate()` (see `R/functions.R` for the covariate standard). Swap a source by changing its path below; nothing else in this document depends on which source it is.
+This document reads four inputs: survey sets, a survey grid, and two covariate files (depth and bottom temperature). It attaches the covariates to the sets and to the grid, and saves two outputs:
 
-* Survey points and the prediction grid come from separate inputs: the official survey grid (`demo-00-get-survey-grid.R`) carries no covariates.
+* **Survey sets with covariates** (`<species>.rds`) are the data the model is fitted to in 02.
+* **Grid covariates** (`grid-covariates.rds`), one row per grid cell and year, are joined to the grid geometry to build the prediction grid in 02 (historical years) and 03 (forecast years).
 
-* Survey sets are from `surveyjoin` (`download-surveyjoin-data.R`): one row per set with its tow date, zeros included. Columns are mapped to the names used downstream below; this is the step to adapt for your own survey data.
+Any input can be swapped by changing its file path under [Inputs](#inputs), e.g. another survey's sets, a different bottom temperature source instead of GLORYS, or another survey grid (e.g., different regions). Survey sets from a source other than surveyjoin will have different column names and units. Edit the transmute() in [Survey sets](#survey-sets) so it produces the same columns (survey_abbrev, event_id, year, date, longitude, latitude, catch_weight, area_swept in km²)
 
-* Combine bottom temperature with the dogfish survey records. Sets get the layer for their own tow date.
+In this example, each covariate file is attached to both the sets and the grid, so the model is fitted and predicted **from the same covariate product**. This avoids bias from mixing data sources. The depth recorded at each set is still kept, as `depth_insitu`, so the product's skill can be checked against it (and the same could be done for other covariates measured in situ).
 
-* Combine bottom temperature with the survey grid (`demo-00-get-survey-grid.R`). The grid has no dates, so it is assigned the `predict_month` and the covariate values are extracted based on this.
 
-* Visual check: map dogfish observations and temperature patterns by year for the full survey and for one region (WCVI)
+### Inputs {#inputs}
+
+* Covariates are attached with `attach_covariate()` (`dshift` package; the covariate standard is in `?dshift::attach_covariate`).
+
+#### Choosing inputs {#choosing-inputs}
+
+**Survey sets.** Every set in `sets_file` is prepared, whichever surveys it holds. Which surveys go into the model is decided in 02, so a file with several surveys can be prepared once and subset later.
+
+**Covariate files.** Each covariate file is used for both the sets and the grid, so pick one product per covariate that covers the fitted years and the forecast years. Depth is static (GEBCO is likely to be the standard). Bottom temperature is monthly (e.g. GLORYS).
+
+**Prediction month (`predict_month`).** Sets get the covariate layer for the month of their tow date. Grid cells, which have no date, will need a month to predict at. How to choose it depends on the model, and if you want to average over multiple months:
+
+* *No season term in the model* (as in the dogfish example): use the month the survey mostly samples, so the covariate effects are predicted under the conditions they were estimated in. SYN WCVI sets are from late May to June, so this is `6`.
+* *Season or month in the model* (a factor, a spatially varying coefficient, or a smooth such as `s(month)`): use the reference season or month the grid is predicted at in 02/03, so temperature and season refer to the same time (e.g. `7` with `season = "Summer"` for the July DFO Maritimes survey).
+* *Averaging over several months* (e.g. 6:7): each year's grid temperature is the mean of those months' layers in that year, here June and July.
+
+**Covariate years (`max_forecast_year`).** Grid covariates are extracted from the first survey year to the earlier of `max_forecast_year` and the last year the temperature file covers. The forecast horizon itself is set in 03 (`forecast_end_year`) and can't go past this. The cap is set here because this is where the grid covariates are extracted.
+
+**Tracking sources (`data_sources`).** The outputs use fixed filenames, so re-rendering with other inputs overwrites them. Each saved object carries a record of the files and settings it was built from, and `check_data_sources()` in 02 and 03 stops if the fit and prediction steps were given outputs from different inputs. This is probably temporary.
 
 ```{r}
 species <- "dogfish"
-# species <- "pacific-cod" # requires stored dataset
+# species <- "pacific-cod" # @todo: add surveyjoin download
 
-# Inputs: change these to swap the survey data, grid or a covariate source
+# Survey sets ------------------------------------------------------------------
 sets_file <- file.path(data_gen_dir, "dogfish-syn-wcvi-sets.rds") # committed; from download-surveyjoin-data.R
 # sets_file <- file.path(data_gen_dir, "dogfish-survey-sets.rds") # all surveys: run download-surveyjoin-data.R
-grid_file <- file.path(data_gen_dir, "dogfish-poly-grid.rds") # sf polygons, geometry only; from demo-00-get-survey-grid.R
+# All sets in the file are prepared; which surveys to model is chosen in 02
 
-# Choose depth source (GEBCO is probably going to be standard)
+# Covariate sources ------------------------------------------------------------
+# Depth (GEBCO is probably going to be standard)
 depth_file <- file.path(data_raw_dir, "gebco-depth.nc") # static; see demo-00-get-GEBCO.R
 # depth_file <- file.path(data_gen_dir, "trond-depth.nc") # see format-trond.R
 
-# Choose bottom temperature source
+# Bottom temperature
 temp_file <- file.path(data_raw_dir, "glorys-bottom-temp-monthly.nc") # monthly; see demo-00-get-GLORYS.R
 # temp_file <- file.path(data_gen_dir, "trond-bottom-temp-june-yearly.nc") # one layer per year; see format-trond.R
 
+# Grid and prediction ----------------------------------------------------------
+# These are prediction choices, but they are made here because the grid's
+# covariates are extracted here.
+grid_file <- file.path(data_gen_dir, "dogfish-poly-grid.rds") # sf polygons, geometry only; from demo-00-get-survey-grid.R
+
 # Prediction month for monthly covariates. Sets get the layer for their own tow
 # date; the grid has no dates, so it gets this month's layer in each year.
-# - No season term in the model (dogfish example): the month the survey mostly
-#   samples, so covariate effects are predicted at the conditions they were
-#   estimated under.
-# - Season factor in the model: pick the reference season, add it to the grid
-#   (prediction-grid chunk), and set this to the month within that season that
-#   its sets mostly fall in, so temperature and season refer to the same time
-#   (e.g. 7 with season = "Summer" for the July DFO Maritimes survey).
-# - Only yearly covariates: NULL.
-# - One month only. `attach_covariate()` can average several months, but the
-#   bottom-temperature map below assumes one layer per year.
+# - If month not needed: NULL. (`attach_covariate()`)
+# - If a vector of months (e.g. 6:7) is provided, they are averaged within each year.
 predict_month <- 6 # SYN WCVI sets are late May to June
 
-# Surveys to model. The dogfish grid falls entirely within the WCVI synoptic
-# survey; modelling more surveys also needs a grid that covers them.
-surveys_use <- "SYN WCVI"
-# surveys_use <- c("SYN WCVI", "SYN QCS", "SYN HS", "SYN WCHG") # all BC synoptic; needs the all-surveys file
-# Not carried by the official grid: the survey level to predict at
-grid_survey_abbrev <- "SYN WCVI"
-
-# Covariate years: survey years through a forecast horizon (the covariate may go to 2099)
-forecast_end_year <- 2060
+# Covariate years run from the first survey year to the earlier of this cap and
+# the last year the covariates cover. The forecast horizon itself is set in 03
+# (forecast_end_year) and can't go past this.
+max_forecast_year <- 2060
+covariate_end_year <- min(max_forecast_year, max(as.integer(format(terra::time(terra::rast(temp_file)), "%Y"))))
 
 # Attached to every saved object and checked downstream (check_data_sources()):
 # outputs use fixed filenames, so a re-render with other sources overwrites them
 data_sources <- list(
   sets = basename(sets_file),
-  surveys = surveys_use,
   grid = basename(grid_file),
-  grid_survey = grid_survey_abbrev,
   depth = basename(depth_file),
   bottom_temp = basename(temp_file),
   predict_month = predict_month,
-  forecast_end_year = forecast_end_year,
+  covariate_end_year = covariate_end_year,
   created = Sys.time()
 )
+```
 
-sets <- readRDS(sets_file) |>
-  filter(survey_name %in% surveys_use)
+### Survey sets {#survey-sets}
+
+* Data used for model fitting.
+
+* Survey sets are from `surveyjoin` (`download-surveyjoin-data.R`): one row per set with its tow date, zeros included. Columns are mapped to the names used downstream below; this is the step to adapt for your own survey data.
+
+* Each set gets depth at its location and bottom temperature from the input data layers indicated in [Inputs](#inputs). These are extracted at the value closest to the set date (which in this case is the month of the set).
+
+* Visual check: map set bottom temperatures by year.
+
+```{r}
+sets <- readRDS(sets_file)
 if (any(sets$effort_units != "ha")) {
   cli::cli_abort("Expected effort in ha; got {.val {unique(sets$effort_units)}}.")
 }
@@ -107,29 +128,29 @@ if (any(sets$effort_units != "ha")) {
 # month of a monthly covariate.
 # Depth for the fit comes from depth_file, extracted the same way as on the
 # grid, so the model is fit and predicted with one depth source. The recorded
-# set depth is kept as depth_recorded for comparison only.
+# set depth is kept as depth_insitu for comparison only.
 dat_sf <- sets |>
   transmute(
     survey_abbrev = factor(survey_name),
-    event_id,
+    event_id, # unique fishing event
     year,
     date = as.Date(date),
     longitude = lon_start,
     latitude = lat_start,
-    depth_recorded = depth_m,
+    depth_insitu = depth_m,
     catch_weight,
     area_swept = effort / 100 # ha to km2
   ) |>
   sdmTMB::add_utm_columns(
     ll_names = c("longitude", "latitude"),
-    utm_crs = utm_crs,
+    utm_crs = utm_crs, # specified in 00-settings.R
     units = "km"
   ) |>
   sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |>
   attach_covariate(depth_file, "depth_m", method = "bilinear") |>
   attach_covariate(temp_file, "bottom_temp", date_col = "date") |>
   filter(depth_m > 0) |> # also drops sets outside the depth raster (NA)
-  filter(!is.na(bottom_temp)) |> # e.g. inshore sets outside the temperature model's ocean cells
+  filter(!is.na(bottom_temp)) |> # no value where the temperature product treats a nearshore set as land, or outside its years
   mutate(log_depth = log(depth_m))
 
 dat <- sf::st_drop_geometry(dat_sf)
@@ -137,13 +158,14 @@ dat <- sf::st_drop_geometry(dat_sf)
 glimpse(dat)
 ```
 
+`r nrow(sets) - nrow(dat)` of `r nrow(sets)` sets were dropped because they had no depth value (outside the depth raster or at depth ≤ 0) or no bottom temperature value (treated as land by the temperature product, or outside its years).
+
 ```{r}
 #| label: wcvi-survey-set-bottom-temp
 
 ggplot(dat_sf) +
   geom_sf(data = pacea::bc_coast) +
   geom_sf(aes(colour = bottom_temp)) +
-  viridis::scale_colour_viridis(option = "plasma") +
   facet_wrap(~ year) +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
   scale_x_continuous(breaks = scales::pretty_breaks(n = 2)) +
@@ -162,11 +184,22 @@ ggplot(dat_sf) +
   gfplot::coord_sf_auto(dat_sf, buffer = 10000)
 ```
 
-### Prediction grid
+### Grid covariates {#grid-covariates}
 
-* The grid file (`demo-00-get-survey-grid.R`) is already split by region: one row per `cell` x `region`, with `cell`, `X`/`Y` (km) and `area` (km²) assigned there. Cells straddling a region boundary have one row per region, each with its own `area`, sharing the parent `cell` id and one `X`/`Y` (the centroid of the whole cell).
+* Data used for predicting/projecting
 
-* Each cell gets depth and bottom temperature (all years) from the covariate files, extracted once per cell at that shared `X`/`Y` and joined back to the region pieces by `cell`. Both halves of a split cell therefore get the same covariate values.
+* The survey grid (`demo-00-get-survey-grid.R`) carries no covariates. It is an sf object, already split by region, with:
+    * `cell`: grid cell ID (duplicated where a region boundary splits a cell)
+    * `region`: e.g., NAFO divisions; here a toy N/S split of WCVI ("WCVI N", "WCVI S"; `R/make-wcvi-region-polygons.R`) to work through multi-region indicators downstream
+    * `X`, `Y`: in UTM kilometres (zone set in `00-settings.R`); for a split cell, the centroid of the whole cell
+    * `area`: in km², per region piece
+    * `geometry`: sf polygon geometry
+
+* Covariates are extracted once per whole cell (at its shared `X`/`Y`) and joined back to the region pieces by `cell`, so both halves of a split cell get the same values. Depth is static, so it is extracted first; cells are then expanded to one row per year (first survey year to `covariate_end_year`: the last covariate year, capped at `max_forecast_year`), and each year gets bottom temperature from its `predict_month` layer.
+
+* `grid_covariates` holds raw (unscaled) covariates for all years. The model-specific steps (scaling with the fit's means/SDs, setting factor reference levels) happen when the prediction grid is built from `grid` + `grid_covariates`: in 02 for the fitted years and in 03 for the forecast years.
+
+* No depth filter is needed on the grid: `demo-00-get-survey-grid.R` already clips its footprint to the GEBCO depth range sampled by the sets.
 
 ```{r}
 grid <- readRDS(grid_file)
@@ -184,40 +217,41 @@ grid_covariates <- grid |>
   mutate(x_m = X * 1000, y_m = Y * 1000) |> # grid CRS is in m
   sf::st_as_sf(coords = c("x_m", "y_m"), crs = sf::st_crs(grid)) |>
   attach_covariate(depth_file, "depth_m", method = "bilinear") |>
+  tidyr::expand_grid(year = min(dat$year):covariate_end_year) |> # static depth first, so it's extracted once per cell
+  sf::st_as_sf() |>
   attach_covariate(temp_file, "bottom_temp", method = "simple", month = predict_month) |>
   sf::st_drop_geometry() |>
-  filter(year >= min(dat$year), year <= forecast_end_year) |>
-  mutate(log_depth = ifelse(depth_m > 0, log(depth_m), NA_real_)) # cells above sea level have no log depth
+  mutate(log_depth = log(depth_m))
 
+# How many cells have missing covariate data?
 grid_covariates |>
   filter(year == min(year)) |>
-  summarise(n_cells = n(), na_depth = sum(is.na(log_depth)), na_temp = sum(is.na(bottom_temp)))
+  summarise(n_cells = n(), na_depth = sum(is.na(depth_m)), na_temp = sum(is.na(bottom_temp)))
 ```
 
 ```{r}
 #| label: bottom-temp-map
 
-# crop for faster plotting of the grid extent only
-temp_rast <- terra::rast(temp_file)
-temp_time <- terra::time(temp_rast)
-temp_keep <- as.integer(format(temp_time, "%Y")) %in% seq(min(dat$year), forecast_end_year, by = 4)
-if (!is.null(predict_month)) temp_keep <- temp_keep & as.integer(format(temp_time, "%m")) %in% predict_month
-temp_plot <- temp_rast[[temp_keep]] |>
-  terra::crop(terra::vect(sf::st_transform(grid, terra::crs(temp_rast))))
-names(temp_plot) <- format(terra::time(temp_plot), "%Y")
+# The values the model gets, every 4th year; grey cells have no value
+temp_plot <- grid |>
+  left_join(
+    filter(grid_covariates, year %in% seq(min(year), max(year), by = 4)),
+    by = c("cell", "X", "Y"),
+    relationship = "many-to-many"
+  )
 
 ggplot() +
-  tidyterra::geom_spatraster(data = temp_plot) +
+  geom_sf(data = temp_plot, aes(fill = bottom_temp), colour = NA) +
   geom_sf(data = pacea::bc_coast) +
-  facet_wrap(~lyr) +
+  facet_wrap(~year) +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
   scale_x_continuous(breaks = scales::pretty_breaks(n = 2)) +
   theme(legend.position = "bottom") +
-  ggtitle(paste("Bottom temperature on the grid:", if (is.null(predict_month)) "yearly layers" else month.name[predict_month])) +
+  ggtitle(paste("Bottom temperature on the grid:", if (is.null(predict_month)) "yearly layers" else paste(month.name[predict_month], collapse = ", "))) +
   viridis::scale_fill_viridis(
     option = "plasma",
     name = "Bottom temperature (°C)",
-    na.value = "transparent",
+    na.value = "grey70",
     guide = guide_colourbar(
       barwidth = unit(6, "cm"),
       barheight = unit(0.4, "cm"),
@@ -225,73 +259,38 @@ ggplot() +
       direction = "horizontal"
     )
   ) +
-  coord_sf(
-    xlim = sf::st_bbox(sf::st_transform(grid, 4326))[c("xmin", "xmax")],
-    ylim = sf::st_bbox(sf::st_transform(grid, 4326))[c("ymin", "ymax")]
-  )
+  gfplot::coord_sf_auto(grid)
 ```
-
-### Assemble the prediction grid
-
-* Regions come with the grid (`demo-00-get-survey-grid.R`): here a toy N/S split of WCVI (`R/make-wcvi-region-polygons.R`) to work through multi-region indicators downstream. A split cell contributes one row per region, each with its own `area` and the shared per-cell covariates.
 
 ```{r}
-#| label: prediction-grid
+#| label: grid-covariates-map
 
-cell_polygons <- grid |>
-  # one survey level for the whole grid; same levels as the sets so a
-  # multi-survey model can predict at it
-  mutate(survey_abbrev = factor(grid_survey_abbrev, levels = levels(dat$survey_abbrev))) |>
-  relocate(survey_abbrev, .after = region)
-  # With a season factor in the model, add the season that predict_month falls in, e.g.
-  # mutate(season = factor("summer", levels = levels(dat$season)))
-
-# Make prediction grid data.frame (keep this object lean because it is expanded to all years)
-prediction_grid <- cell_polygons |>
-  sf::st_drop_geometry() |>
-  left_join(grid_covariates, by = c("cell", "X", "Y"), relationship = "many-to-many") |>
-  select(cell, region, survey_abbrev, area, X, Y, depth_m, log_depth, year, bottom_temp) |>
-  filter(!is.na(bottom_temp), !is.na(log_depth), !is.infinite(log_depth))
-
-# Check prediction grid
-cell_polygons |>
-  select(cell, region, geometry) |>
-  left_join(
-    prediction_grid |> filter(year == max(dat$year) + 1),
-    by = c("cell", "region")
-  ) |>
+# One year joined back to the polygons; grey cells have no covariate value
+grid |>
+  left_join(filter(grid_covariates, year == max(dat$year) + 1), by = c("cell", "X", "Y")) |>
   ggplot() +
-  geom_sf(aes(fill = depth_m, colour = region))
-
-unique(prediction_grid$year)
-
+  geom_sf(aes(fill = depth_m, colour = region)) +
+  scale_fill_viridis_c(trans = "log10")
 ```
 
-### Save prepared data for species distribution modelling
+### Save prepared data for species distribution modelling {#save-outputs}
 
 ```{r}
 attr(dat, "data_sources") <- data_sources
-attr(cell_polygons, "data_sources") <- data_sources
-attr(prediction_grid, "data_sources") <- data_sources
+attr(grid_covariates, "data_sources") <- data_sources
 
-out_filename <- paste0(species, ".rds")
-# Objects saved
-# - cleaned survey data
-saveRDS(dat, file = file.path(model_input_dir, out_filename))
+# Survey sets with covariates
+saveRDS(dat, file = file.path(model_input_dir, paste0(species, ".rds")))
 
-# - minimize object sizes: rasterized cell polygons (keyed by `cell`/`region`)
-# - join downstream for plotting / sf uses
-# @TODO: might make sense to make this a standard filename
-saveRDS(cell_polygons, file = file.path(model_input_dir, "wcvi-cell-polygons.rds"))
-
-# - prediction grid data.frame
-saveRDS(prediction_grid, file = file.path(model_input_dir, "prediction-grid.rds"))
+# Raw covariates per grid cell and year (no geometry). The geometry stays in
+# grid_file, which 02 and 03 read via data_sources$grid.
+saveRDS(grid_covariates, file = file.path(model_input_dir, "grid-covariates.rds"))
 ```
 
-* Species survey data with covariate data (bottom temperature and depth) [data.frame]
+* Species survey data with covariates (depth, log depth, bottom temperature) [data.frame]
 
-* Prediction grid (depth + bottom temperature, all forecast years) [data.frame], keyed by `cell`/`region`
+* Grid covariates: one row per `cell` x `year` (fitted and forecast years), with `X`/`Y`, `depth_m`, `log_depth` and `bottom_temp` [data.frame]
 
-* Cell polygons keyed by `cell`/`region` [sf], for joining predictions back to polygons for plotting
+* The grid geometry is not re-saved: 02 and 03 read `grid_file` (named in `data_sources$grid`) and join to it by `cell`
 
-* Each carries a `data_sources` attribute (survey, grid and covariate files); `check_data_sources()` in 02 and 03 confirms they match
+* Each saved object carries a `data_sources` attribute (survey, grid and covariate files); `check_data_sources()` in 02 and 03 confirms they match
