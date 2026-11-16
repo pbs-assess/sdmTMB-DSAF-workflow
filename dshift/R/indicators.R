@@ -328,7 +328,7 @@ abundance_by_group <- function(sims, weighted_cols = NULL, by_region = TRUE) {
 #' inflation that per-cell diagnostics suggest is driven by outlier cells
 #' rather than broad-based spatial spread.
 #'
-#' Cells split across regions (see `01-data-prep.qmd`'s N/S WCVI split)
+#' Cells split across regions (see `01-data-prep`'s N/S WCVI split)
 #' contribute one row per region but keep the parent `cell` id and identical
 #' `log_density` in every half. That's correct for `by_region = TRUE` (each
 #' half legitimately represents that region's share of the cell), but with

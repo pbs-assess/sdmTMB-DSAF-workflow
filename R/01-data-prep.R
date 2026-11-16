@@ -1,21 +1,19 @@
----
-title: "1. Data Preparation"
-format:
-  html:
-    toc: true
-    code-fold: true  # code shown, collapsed by default
-execute:
-  echo: true
-  warning: false    # hide warnings
-  message: false    # hide messages (e.g. package load chatter)
----
+#' ---
+#' title: "1. Data Preparation"
+#' format:
+#'   html:
+#'     toc: true
+#'     code-fold: true  # code shown, collapsed by default
+#' execute:
+#'   echo: true
+#'   warning: false    # hide warnings
+#'   message: false    # hide messages (e.g. package load chatter)
+#' ---
 
-```{r}
 #| include: false
 knitr::opts_chunk$set(results = "hide")
-```
 
-```{r}
+#+
 # Setup
 library(dplyr)
 library(sdmTMB)
@@ -24,41 +22,68 @@ library(sf)
 
 source(here::here("R", "00-settings.R"))
 source(here::here("R", "functions.R"))
-```
 
-### Overview {#overview}
+#' ### Overview {#overview}
+#'
+#' This document reads four inputs: survey sets, a survey grid, and two covariate files (depth and bottom temperature).
+#' It attaches the covariates to the sets and to the grid, and saves two outputs:
+#'
+#' * **Survey sets with covariates** (`<species>.rds`) are the data the model is fitted to in 02.
+#' * **Grid covariates** (`grid-covariates.rds`), one row per grid cell and year,
+#'   are joined to the grid geometry to build the prediction grid in 02 (historical years) and 03 (forecast years).
+#'
+#' Any input can be swapped by changing its file path under [Inputs](#inputs),
+#' e.g. another survey's sets, a different bottom temperature source instead of GLORYS, or another survey grid (e.g., different regions).
+#' Survey sets from a source other than surveyjoin will have different column names and units.
+#' Edit the transmute() in [Survey sets](#survey-sets) so it produces the same columns
+#' (survey_abbrev, event_id, year, date, longitude, latitude, catch_weight, area_swept in km²).
+#'
+#' In this example, each covariate file is attached to both the sets and the grid, so the model is fitted and predicted **from the same covariate product**.
+#' This avoids bias from mixing data sources.
+#' The depth recorded at each set is still kept, as `depth_insitu`, so the product's skill can be checked against it
+#' (and the same could be done for other covariates measured in situ).
+#'
+#'
+#' ### Inputs {#inputs}
+#'
+#' * Covariates are attached with `attach_covariate()` (`dshift` package; the covariate standard is in `?dshift::attach_covariate`).
+#'
+#' #### Choosing inputs {#choosing-inputs}
+#'
+#' **Survey sets.**
+#' Every set in `sets_file` is prepared, whichever surveys it holds.
+#' Which surveys go into the model is decided in 02, so a file with several surveys can be prepared once and subset later.
+#'
+#' **Covariate files.**
+#' Each covariate file is used for both the sets and the grid, so pick one product per covariate that covers the fitted years and the forecast years.
+#' Depth is static (GEBCO is likely to be the standard).
+#' Bottom temperature is monthly (e.g. GLORYS).
+#'
+#' **Prediction month (`predict_month`).**
+#' Sets get the covariate layer for the month of their tow date.
+#' Grid cells, which have no date, will need a month to predict at.
+#' How to choose it depends on the model, and if you want to average over multiple months:
+#'
+#' * *No season term in the model* (as in the dogfish example):
+#'   use the month the survey mostly samples, so the covariate effects are predicted under the conditions they were estimated in.
+#'   SYN WCVI sets are from late May to June, so this is `6`.
+#' * *Season or month in the model* (a factor, a spatially varying coefficient, or a smooth such as `s(month)`):
+#'   use the reference season or month the grid is predicted at in 02/03, so temperature and season refer to the same time
+#'   (e.g. `7` with `season = "Summer"` for the July DFO Maritimes survey).
+#' * *Averaging over several months* (e.g. 6:7):
+#'   each year's grid temperature is the mean of those months' layers in that year, here June and July.
+#'
+#' **Covariate years (`max_forecast_year`).**
+#' Grid covariates are extracted from the first survey year to the earlier of `max_forecast_year` and the last year the temperature file covers.
+#' The forecast horizon itself is set in 03 (`forecast_end_year`) and can't go past this.
+#' The cap is set here because this is where the grid covariates are extracted.
+#'
+#' **Tracking sources (`data_sources`).**
+#' The outputs use fixed filenames, so re-rendering with other inputs overwrites them.
+#' Each saved object carries a record of the files and settings it was built from,
+#' and `check_data_sources()` in 02 and 03 stops if the fit and prediction steps were given outputs from different inputs.
+#' This is probably temporary.
 
-This document reads four inputs: survey sets, a survey grid, and two covariate files (depth and bottom temperature). It attaches the covariates to the sets and to the grid, and saves two outputs:
-
-* **Survey sets with covariates** (`<species>.rds`) are the data the model is fitted to in 02.
-* **Grid covariates** (`grid-covariates.rds`), one row per grid cell and year, are joined to the grid geometry to build the prediction grid in 02 (historical years) and 03 (forecast years).
-
-Any input can be swapped by changing its file path under [Inputs](#inputs), e.g. another survey's sets, a different bottom temperature source instead of GLORYS, or another survey grid (e.g., different regions). Survey sets from a source other than surveyjoin will have different column names and units. Edit the transmute() in [Survey sets](#survey-sets) so it produces the same columns (survey_abbrev, event_id, year, date, longitude, latitude, catch_weight, area_swept in km²)
-
-In this example, each covariate file is attached to both the sets and the grid, so the model is fitted and predicted **from the same covariate product**. This avoids bias from mixing data sources. The depth recorded at each set is still kept, as `depth_insitu`, so the product's skill can be checked against it (and the same could be done for other covariates measured in situ).
-
-
-### Inputs {#inputs}
-
-* Covariates are attached with `attach_covariate()` (`dshift` package; the covariate standard is in `?dshift::attach_covariate`).
-
-#### Choosing inputs {#choosing-inputs}
-
-**Survey sets.** Every set in `sets_file` is prepared, whichever surveys it holds. Which surveys go into the model is decided in 02, so a file with several surveys can be prepared once and subset later.
-
-**Covariate files.** Each covariate file is used for both the sets and the grid, so pick one product per covariate that covers the fitted years and the forecast years. Depth is static (GEBCO is likely to be the standard). Bottom temperature is monthly (e.g. GLORYS).
-
-**Prediction month (`predict_month`).** Sets get the covariate layer for the month of their tow date. Grid cells, which have no date, will need a month to predict at. How to choose it depends on the model, and if you want to average over multiple months:
-
-* *No season term in the model* (as in the dogfish example): use the month the survey mostly samples, so the covariate effects are predicted under the conditions they were estimated in. SYN WCVI sets are from late May to June, so this is `6`.
-* *Season or month in the model* (a factor, a spatially varying coefficient, or a smooth such as `s(month)`): use the reference season or month the grid is predicted at in 02/03, so temperature and season refer to the same time (e.g. `7` with `season = "Summer"` for the July DFO Maritimes survey).
-* *Averaging over several months* (e.g. 6:7): each year's grid temperature is the mean of those months' layers in that year, here June and July.
-
-**Covariate years (`max_forecast_year`).** Grid covariates are extracted from the first survey year to the earlier of `max_forecast_year` and the last year the temperature file covers. The forecast horizon itself is set in 03 (`forecast_end_year`) and can't go past this. The cap is set here because this is where the grid covariates are extracted.
-
-**Tracking sources (`data_sources`).** The outputs use fixed filenames, so re-rendering with other inputs overwrites them. Each saved object carries a record of the files and settings it was built from, and `check_data_sources()` in 02 and 03 stops if the fit and prediction steps were given outputs from different inputs. This is probably temporary.
-
-```{r}
 species <- "dogfish"
 # species <- "pacific-cod" # @todo: add surveyjoin download
 
@@ -104,19 +129,19 @@ data_sources <- list(
   covariate_end_year = covariate_end_year,
   created = Sys.time()
 )
-```
 
-### Survey sets {#survey-sets}
+#' ### Survey sets {#survey-sets}
+#'
+#' * Data used for model fitting.
+#'
+#' * Survey sets are from `surveyjoin` (`download-surveyjoin-data.R`): one row per set with its tow date, zeros included.
+#'   Columns are mapped to the names used downstream below; this is the step to adapt for your own survey data.
+#'
+#' * Each set gets depth at its location and bottom temperature from the input data layers indicated in [Inputs](#inputs).
+#'   These are extracted at the value closest to the set date (which in this case is the month of the set).
+#'
+#' * Visual check: map set bottom temperatures by year.
 
-* Data used for model fitting.
-
-* Survey sets are from `surveyjoin` (`download-surveyjoin-data.R`): one row per set with its tow date, zeros included. Columns are mapped to the names used downstream below; this is the step to adapt for your own survey data.
-
-* Each set gets depth at its location and bottom temperature from the input data layers indicated in [Inputs](#inputs). These are extracted at the value closest to the set date (which in this case is the month of the set).
-
-* Visual check: map set bottom temperatures by year.
-
-```{r}
 sets <- readRDS(sets_file)
 if (any(sets$effort_units != "ha")) {
   cli::cli_abort("Expected effort in ha; got {.val {unique(sets$effort_units)}}.")
@@ -156,11 +181,12 @@ dat_sf <- sets |>
 dat <- sf::st_drop_geometry(dat_sf)
 
 glimpse(dat)
-```
 
-`r nrow(sets) - nrow(dat)` of `r nrow(sets)` sets were dropped because they had no depth value (outside the depth raster or at depth ≤ 0) or no bottom temperature value (treated as land by the temperature product, or outside its years).
+#' `r nrow(sets) - nrow(dat)` of `r nrow(sets)` sets were dropped because they had
+#' no depth value (outside the depth raster or at depth ≤ 0)
+#' or no bottom temperature value (treated as land by the temperature product, or outside its years).
 
-```{r}
+#+
 #| label: wcvi-survey-set-bottom-temp
 
 ggplot(dat_sf) +
@@ -182,26 +208,33 @@ ggplot(dat_sf) +
     )
   ) +
   gfplot::coord_sf_auto(dat_sf, buffer = 10000)
-```
 
-### Grid covariates {#grid-covariates}
+#' ### Grid covariates {#grid-covariates}
+#'
+#' * Data used for predicting/projecting
+#'
+#' * The survey grid (`demo-00-get-survey-grid.R`) carries no covariates.
+#'   It is an sf object, already split by region, with:
+#'     * `cell`: grid cell ID (duplicated where a region boundary splits a cell)
+#'     * `region`: e.g., NAFO divisions;
+#'       here a toy N/S split of WCVI ("WCVI N", "WCVI S"; `R/make-wcvi-region-polygons.R`) to work through multi-region indicators downstream
+#'     * `X`, `Y`: in UTM kilometres (zone set in `00-settings.R`); for a split cell, the centroid of the whole cell
+#'     * `area`: in km², per region piece
+#'     * `geometry`: sf polygon geometry
+#'
+#' * Covariates are extracted once per whole cell (at its shared `X`/`Y`) and joined back to the region pieces by `cell`,
+#'   so both halves of a split cell get the same values.
+#'   Depth is static, so it is extracted first;
+#'   cells are then expanded to one row per year (first survey year to `covariate_end_year`: the last covariate year, capped at `max_forecast_year`),
+#'   and each year gets bottom temperature from its `predict_month` layer.
+#'
+#' * `grid_covariates` holds raw (unscaled) covariates for all years.
+#'   The model-specific steps (scaling with the fit's means/SDs, setting factor reference levels)
+#'   happen when the prediction grid is built from `grid` + `grid_covariates`: in 02 for the fitted years and in 03 for the forecast years.
+#'
+#' * No depth filter is needed on the grid:
+#'   `demo-00-get-survey-grid.R` already clips its footprint to the GEBCO depth range sampled by the sets.
 
-* Data used for predicting/projecting
-
-* The survey grid (`demo-00-get-survey-grid.R`) carries no covariates. It is an sf object, already split by region, with:
-    * `cell`: grid cell ID (duplicated where a region boundary splits a cell)
-    * `region`: e.g., NAFO divisions; here a toy N/S split of WCVI ("WCVI N", "WCVI S"; `R/make-wcvi-region-polygons.R`) to work through multi-region indicators downstream
-    * `X`, `Y`: in UTM kilometres (zone set in `00-settings.R`); for a split cell, the centroid of the whole cell
-    * `area`: in km², per region piece
-    * `geometry`: sf polygon geometry
-
-* Covariates are extracted once per whole cell (at its shared `X`/`Y`) and joined back to the region pieces by `cell`, so both halves of a split cell get the same values. Depth is static, so it is extracted first; cells are then expanded to one row per year (first survey year to `covariate_end_year`: the last covariate year, capped at `max_forecast_year`), and each year gets bottom temperature from its `predict_month` layer.
-
-* `grid_covariates` holds raw (unscaled) covariates for all years. The model-specific steps (scaling with the fit's means/SDs, setting factor reference levels) happen when the prediction grid is built from `grid` + `grid_covariates`: in 02 for the fitted years and in 03 for the forecast years.
-
-* No depth filter is needed on the grid: `demo-00-get-survey-grid.R` already clips its footprint to the GEBCO depth range sampled by the sets.
-
-```{r}
 grid <- readRDS(grid_file)
 # Set X/Y (utm_crs, 00-settings.R) and grid X/Y must share a CRS for the mesh
 # and predictions to line up
@@ -227,9 +260,8 @@ grid_covariates <- grid |>
 grid_covariates |>
   filter(year == min(year)) |>
   summarise(n_cells = n(), na_depth = sum(is.na(depth_m)), na_temp = sum(is.na(bottom_temp)))
-```
 
-```{r}
+#+
 #| label: bottom-temp-map
 
 # The values the model gets, every 4th year; grey cells have no value
@@ -260,9 +292,8 @@ ggplot() +
     )
   ) +
   gfplot::coord_sf_auto(grid)
-```
 
-```{r}
+#+
 #| label: grid-covariates-map
 
 # One year joined back to the polygons; grey cells have no covariate value
@@ -271,11 +302,9 @@ grid |>
   ggplot() +
   geom_sf(aes(fill = depth_m, colour = region)) +
   scale_fill_viridis_c(trans = "log10")
-```
 
-### Save prepared data for species distribution modelling {#save-outputs}
+#' ### Save prepared data for species distribution modelling {#save-outputs}
 
-```{r}
 attr(dat, "data_sources") <- data_sources
 attr(grid_covariates, "data_sources") <- data_sources
 
@@ -285,12 +314,14 @@ saveRDS(dat, file = file.path(model_input_dir, paste0(species, ".rds")))
 # Raw covariates per grid cell and year (no geometry). The geometry stays in
 # grid_file, which 02 and 03 read via data_sources$grid.
 saveRDS(grid_covariates, file = file.path(model_input_dir, "grid-covariates.rds"))
-```
 
-* Species survey data with covariates (depth, log depth, bottom temperature) [data.frame]
-
-* Grid covariates: one row per `cell` x `year` (fitted and forecast years), with `X`/`Y`, `depth_m`, `log_depth` and `bottom_temp` [data.frame]
-
-* The grid geometry is not re-saved: 02 and 03 read `grid_file` (named in `data_sources$grid`) and join to it by `cell`
-
-* Each saved object carries a `data_sources` attribute (survey, grid and covariate files); `check_data_sources()` in 02 and 03 confirms they match
+#' * Species survey data with covariates (depth, log depth, bottom temperature) [data.frame]
+#'
+#' * Grid covariates: one row per `cell` x `year` (fitted and forecast years),
+#'   with `X`/`Y`, `depth_m`, `log_depth` and `bottom_temp` [data.frame]
+#'
+#' * The grid geometry is not re-saved:
+#'   02 and 03 read `grid_file` (named in `data_sources$grid`) and join to it by `cell`
+#'
+#' * Each saved object carries a `data_sources` attribute (survey, grid and covariate files);
+#'   `check_data_sources()` in 02 and 03 confirms they match

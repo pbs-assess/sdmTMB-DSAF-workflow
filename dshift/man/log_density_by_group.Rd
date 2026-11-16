@@ -25,7 +25,7 @@ inflation that per-cell diagnostics suggest is driven by outlier cells
 rather than broad-based spatial spread.
 }
 \details{
-Cells split across regions (see \code{01-data-prep.qmd}'s N/S WCVI split)
+Cells split across regions (see \code{01-data-prep}'s N/S WCVI split)
 contribute one row per region but keep the parent \code{cell} id and identical
 \code{log_density} in every half. That's correct for \code{by_region = TRUE} (each
 half legitimately represents that region's share of the cell), but with

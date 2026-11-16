@@ -176,7 +176,7 @@ ggplot(sets_depth, aes(depth_m, gebco_depth)) +
   labs(x = "Recorded set depth (m)", y = "GEBCO depth at tow start (m)")
 
 # --- 7. Using it downstream ---------------------------------------------------
-# 01-data-prep.qmd reads this file as depth_file and extracts it with
+# 01-data-prep.R reads this file as depth_file and extracts it with
 # method = "bilinear" at both the sets (for the fit) and the grid cell centroids
 # (for prediction), so the model sees one depth source throughout. The
 # comparison above shows how far that is from the recorded set depth.

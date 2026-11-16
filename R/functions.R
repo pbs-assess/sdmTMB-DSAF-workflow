@@ -53,14 +53,14 @@ check_data_sources <- function(...) {
   sources <- purrr::map(list(...), \(x) attr(x, "data_sources"))
   missing <- names(sources)[purrr::map_lgl(sources, is.null)]
   if (length(missing)) {
-    cli::cli_abort("No {.field data_sources} attribute on {.val {missing}}; re-render {.file 01-data-prep.qmd}.")
+    cli::cli_abort("No {.field data_sources} attribute on {.val {missing}}; re-render {.file 01-data-prep.R}.")
   }
   # `created` differs between runs with identical sources
   same <- purrr::map_lgl(sources, \(x) identical(x[names(x) != "created"], sources[[1]][names(sources[[1]]) != "created"]))
   if (!all(same)) {
     cli::cli_abort(c(
       "Inputs were built from different data sources: {.val {names(sources)[!same]}} differ{?s/} from {.val {names(sources)[1]}}.",
-      "i" = "Re-render {.file 01-data-prep.qmd} and refit, or load matching files."
+      "i" = "Re-render {.file 01-data-prep.R} and refit, or load matching files."
     ))
   }
   src <- sources[[1]]
