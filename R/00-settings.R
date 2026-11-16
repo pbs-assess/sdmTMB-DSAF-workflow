@@ -27,7 +27,7 @@ utm_crs <- 32609
 # -----------------------------------------------------------------------------
 # plotting
 
-theme_set(ggsidekick::theme_sleek())
+ggplot2::theme_set(gfplot::theme_pbs())
 
 # use bayesplot blues
 blues <- c("lightest" = "#d1e1ec", "light" = "#b3cde0", "mid" = "#6497b1", "#005b96", "dark" = "#03396c", "darkest" = "#011f4b")
